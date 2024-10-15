@@ -244,6 +244,9 @@ void key_event(XPointer priv, XRecordInterceptData *hook) {
 }
 
 int main() {
+    // Hide the cursor when the program starts
+    printf("\033[?25l");
+
     Display *display;
     XRecordContext context;
     XRecordRange *range;
@@ -283,6 +286,9 @@ int main() {
     // Free resources
     XRecordFreeContext(display, context);
     XCloseDisplay(display);
+
+    // Show the cursor again when the program exits
+    printf("\033[?25h");
 
     return 0;
 }
