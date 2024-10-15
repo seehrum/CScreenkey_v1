@@ -1,23 +1,48 @@
-//  command to compile: gcc CScreenkey_v1.c -o screenkey -lX11 -lXtst
-
 #include <stdio.h>
 #include <stdlib.h>
-#include <X11/Xlib.h>
-#include <X11/keysym.h>
-#include <X11/extensions/record.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <unistd.h>
-#include <ctype.h>  // Includes for toupper()
+#include <sys/ioctl.h>
+#include <ctype.h>
+#include <X11/Xlib.h>
+#include <X11/Xproto.h>    // For xEvent
+#include <X11/XKBlib.h>    // For XkbKeycodeToKeysym
+#include <X11/keysym.h>
+#include <X11/X.h>
+#include <X11/extensions/record.h>
 
-// Define the key map structure
+#define MAX_MESSAGE_LENGTH 256
+
+static Display *display = NULL;            // Display for keyboard events
+static int mouse_button_pressed = 0;       // Indicates if a mouse button is pressed
+
+// Variables to maintain the state of modifier keys
+static int shift_l_pressed = 0;
+static int shift_r_pressed = 0;
+static int ctrl_l_pressed = 0;
+static int ctrl_r_pressed = 0;
+static int alt_l_pressed = 0;
+static int alt_r_pressed = 0;
+static int meta_l_pressed = 0;
+static int meta_r_pressed = 0;
+
+// Structure to map special keys
 typedef struct {
     KeySym keysym;
-    const char* name;
+    const char *name;
 } KeyMap;
 
-// Special key map
 KeyMap specialKeyMap[] = {
+    // Modifier keys
+    {XK_Shift_L, "SHIFT_L"},
+    {XK_Shift_R, "SHIFT_R"},
+    {XK_Control_L, "CONTROL_L"},
+    {XK_Control_R, "CONTROL_R"},
+    {XK_Alt_L, "ALT_L"},
+    {XK_Alt_R, "ALT_R"},
+    {XK_Meta_L, "META_L"},
+    {XK_Meta_R, "META_R"},
+    // Other special keys
     {XK_apostrophe, "APOSTROPHE (')"},
     {XK_slash, "SLASH (/)"},
     {XK_backslash, "BACKSLASH (\\)"},
@@ -45,250 +70,275 @@ KeyMap specialKeyMap[] = {
     {XK_End, "END"}
 };
 
-// Function to find special key by keysym
-const char* find_special_key_name(KeySym keysym) {
-    int map_size = sizeof(specialKeyMap) / sizeof(specialKeyMap[0]);
-    for (int i = 0; i < map_size; i++) {
+#define SPECIAL_KEY_MAP_SIZE (sizeof(specialKeyMap)/sizeof(KeyMap))
+
+// Function to get terminal size
+void get_terminal_size(int *rows, int *cols) {
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != -1) {
+        *rows = ws.ws_row;
+        *cols = ws.ws_col;
+    } else {
+        *rows = 24;
+        *cols = 80;
+    }
+}
+
+// Function to disable the cursor
+void disable_cursor() {
+    printf("\033[?25l");  // Hides the cursor
+}
+
+// Function to enable the cursor
+void enable_cursor() {
+    printf("\033[?25h");  // Shows the cursor
+}
+
+// Function to print centered text in the terminal
+void print_centered(const char *message) {
+    int rows, cols;
+    get_terminal_size(&rows, &cols);
+
+    int len = strlen(message);
+    int x = (cols - len) / 2;
+    int y = rows / 2;
+
+    // Clear the screen and move the cursor to the center
+    printf("\033[H\033[J"); // Clears the screen
+    printf("\033[%d;%dH%s\n", y, x, message); // Moves the cursor and prints the text
+    fflush(stdout); // Ensures the text is displayed immediately
+}
+
+// Function to convert mouse button number to name
+const char* mouse_button_to_name(int button) {
+    switch (button) {
+        case Button1:
+            return "LEFT CLICK";
+        case Button2:
+            return "MIDDLE CLICK";
+        case Button3:
+            return "RIGHT CLICK";
+        case Button4:
+            return "WHEEL UP";
+        case Button5:
+            return "WHEEL DOWN";
+        default:
+            return "UNKNOWN BUTTON";
+    }
+}
+
+// Function to convert KeySym to a friendly name
+const char* keysym_to_string(KeySym keysym) {
+    // Check if the key is in the special key map
+    for (size_t i = 0; i < SPECIAL_KEY_MAP_SIZE; i++) {
         if (specialKeyMap[i].keysym == keysym) {
             return specialKeyMap[i].name;
         }
     }
-    return NULL;  // Return NULL if no match found
+    // If not, convert to default string
+    return XKeysymToString(keysym);
 }
 
-// Function to clear the screen
-void clear_screen() {
-    printf("\033[H\033[J");
-}
+// Callback function to process intercepted events
+void event_callback(XPointer priv, XRecordInterceptData *data) {
+    if (data->category == XRecordFromServer && data->data != NULL) {
+        xEvent *event = (xEvent *)data->data;
+        char message[MAX_MESSAGE_LENGTH * 2 + 10] = ""; // Adjusted buffer size
 
-// Function to get the terminal size
-void get_terminal_size(int *rows, int *cols) {
-    struct winsize w;
-    ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
-    *rows = w.ws_row;
-    *cols = w.ws_col;
-}
+        // Get the event type
+        int event_type = event->u.u.type & 0x7F; // Ignore the send_event bit
 
-// Function to print centered text
-void print_centered(const char *text) {
-    int rows, cols;
-    get_terminal_size(&rows, &cols);  // Get terminal size
-    int len = strlen(text);
-    int padding_left = (cols - len) / 2;
-    int padding_top = rows / 2;
-
-    clear_screen();  // Clear screen
-
-    // Add vertical padding
-    for (int i = 0; i < padding_top; i++) {
-        printf("\n");
-    }
-
-    // Add horizontal padding and print the text centered
-    for (int i = 0; i < padding_left; i++) {
-        printf(" ");
-    }
-    printf("%s\n", text);
-}
-
-// Function to convert string to uppercase
-void to_uppercase(char *str) {
-    for (int i = 0; str[i]; i++) {
-        str[i] = toupper(str[i]);
-    }
-}
-
-// Function to handle mouse events
-void print_mouse_event(const char *button_name) {
-    char upper_button_name[256];
-    strcpy(upper_button_name, button_name);
-    to_uppercase(upper_button_name);
-    print_centered(upper_button_name);  // Display the button pressed in the center
-}
-
-// Global variables for modifier key states
-char ctrl_pressed[10] = "";
-char shift_pressed[10] = "";
-char alt_pressed[10] = "";
-int mouse_button_pressed = 0;  // Indicates if a mouse button is pressed
-char last_mouse_button[50] = "";  // Stores the name of the last mouse button pressed
-
-// Function to handle keyboard and mouse events
-void key_event(XPointer priv, XRecordInterceptData *hook) {
-    if (hook->category == XRecordFromServer && hook->data != NULL) {
-        unsigned char event_type = hook->data[0];  // Event type
-        unsigned char keycode_or_button = hook->data[1];  // Key or button code
-
-        // Check if the event is KeyPress or KeyRelease
-        if (event_type == KeyPress || event_type == KeyRelease) {
-            Display *dpy = XOpenDisplay(NULL);
-            if (dpy == NULL) {
-                fprintf(stderr, "Unable to open X display\n");
-                return;
-            }
-
-            // Get KeySym from the keycode
-            KeySym keysym = XKeycodeToKeysym(dpy, keycode_or_button, 0);
-            if (keysym != NoSymbol) {
-                const char *key_name = find_special_key_name(keysym);
-                if (key_name == NULL) {
-                    key_name = XKeysymToString(keysym);  // Fallback to keysym string
-                }
-
-                if (key_name != NULL) {
-                    char display_string[256] = "";
-                    strcpy(display_string, key_name);
-                    to_uppercase(display_string);
-
-                    // Handle KeyPress event
-                    if (event_type == KeyPress) {
-                        // If a mouse button is pressed, display mouse button + key
-                        if (mouse_button_pressed) {
-                            char display_combination[256] = "";
-                            strcat(display_combination, last_mouse_button);
-                            strcat(display_combination, " + ");
-                            strcat(display_combination, display_string);
-                            to_uppercase(display_combination);
-                            print_centered(display_combination);
-
-                            // Reset mouse button state after displaying
-                            mouse_button_pressed = 0;
-                            last_mouse_button[0] = '\0';
-                        } else {
-                            // Update modifier key states
-                            if (strcmp(display_string, "CONTROL_L") == 0 || strcmp(display_string, "CONTROL_R") == 0) {
-                                strcpy(ctrl_pressed, display_string);
-                                print_centered(display_string);  // Display the modifier key alone
-                            } else if (strcmp(display_string, "SHIFT_L") == 0 || strcmp(display_string, "SHIFT_R") == 0) {
-                                strcpy(shift_pressed, display_string);
-                                print_centered(display_string);  // Display the modifier key alone
-                            } else if (strcmp(display_string, "ALT_L") == 0 || strcmp(display_string, "ALT_R") == 0) {
-                                strcpy(alt_pressed, display_string);
-                                print_centered(display_string);  // Display the modifier key alone
-                            } else {
-                                // Display key with modifiers, if any
-                                char display_combination[256] = "";
-
-                                if (strlen(ctrl_pressed) > 0) {
-                                    strcat(display_combination, ctrl_pressed);
-                                    strcat(display_combination, " + ");
-                                }
-                                if (strlen(shift_pressed) > 0) {
-                                    strcat(display_combination, shift_pressed);
-                                    strcat(display_combination, " + ");
-                                }
-                                if (strlen(alt_pressed) > 0) {
-                                    strcat(display_combination, alt_pressed);
-                                    strcat(display_combination, " + ");
-                                }
-
-                                strcat(display_combination, display_string);
-                                to_uppercase(display_combination);
-
-                                print_centered(display_combination);
-                            }
-                        }
-                    }
-                    // Handle KeyRelease event to reset the state
-                    else if (event_type == KeyRelease) {
-                        if (strcmp(display_string, "CONTROL_L") == 0 || strcmp(display_string, "CONTROL_R") == 0) {
-                            ctrl_pressed[0] = '\0';  // Clear the Control key state
-                        } else if (strcmp(display_string, "SHIFT_L") == 0 || strcmp(display_string, "SHIFT_R") == 0) {
-                            shift_pressed[0] = '\0';  // Clear the Shift key state
-                        } else if (strcmp(display_string, "ALT_L") == 0 || strcmp(display_string, "ALT_R") == 0) {
-                            alt_pressed[0] = '\0';  // Clear the Alt key state
-                        }
-                    }
-                }
-            }
-
-            XCloseDisplay(dpy);
+        // Mouse event handling
+        if (event_type == ButtonPress) {
+            mouse_button_pressed = event->u.u.detail; // The detail field contains the button number
+            const char *button_name = mouse_button_to_name(mouse_button_pressed);
+            snprintf(message, sizeof(message), "%s", button_name);
+            print_centered(message);
+        } else if (event_type == ButtonRelease) {
+            mouse_button_pressed = 0; // Mouse button released
         }
-        // Check if the event is ButtonPress or ButtonRelease (mouse)
-        else if (event_type == ButtonPress || event_type == ButtonRelease) {
-            const char *button_name = NULL;
+        // Keyboard event handling
+        else if (event_type == KeyPress || event_type == KeyRelease) {
+            unsigned int keycode = event->u.u.detail;
+            KeySym keysym = XkbKeycodeToKeysym(display, keycode, 0, 0);
 
-            switch (keycode_or_button) {
-                case 1:
-                    button_name = "LEFT BUTTON";
+            // Update the state of modifier keys
+            int is_key_press = (event_type == KeyPress);
+
+            // Update individual modifier key states
+            switch (keysym) {
+                case XK_Shift_L:
+                    shift_l_pressed = is_key_press;
                     break;
-                case 2:
-                    button_name = "MIDDLE BUTTON";
+                case XK_Shift_R:
+                    shift_r_pressed = is_key_press;
                     break;
-                case 3:
-                    button_name = "RIGHT BUTTON";
+                case XK_Control_L:
+                    ctrl_l_pressed = is_key_press;
                     break;
-                case 4:
-                    button_name = "MOUSE WHEEL UP";
+                case XK_Control_R:
+                    ctrl_r_pressed = is_key_press;
                     break;
-                case 5:
-                    button_name = "MOUSE WHEEL DOWN";
+                case XK_Alt_L:
+                    alt_l_pressed = is_key_press;
+                    break;
+                case XK_Alt_R:
+                    alt_r_pressed = is_key_press;
+                    break;
+                case XK_Meta_L:
+                    meta_l_pressed = is_key_press;
+                    break;
+                case XK_Meta_R:
+                    meta_r_pressed = is_key_press;
+                    break;
+                default:
                     break;
             }
 
-            if (button_name != NULL) {
-                if (event_type == ButtonPress) {
-                    mouse_button_pressed = 1;  // Set mouse pressed state
-                    strcpy(last_mouse_button, button_name);  // Store the mouse button name
-                } else if (event_type == ButtonRelease) {
-                    mouse_button_pressed = 0;  // Reset mouse pressed state
-                    last_mouse_button[0] = '\0';  // Clear the mouse button name
-                }
+            // Process the key if it's a KeyPress event
+            if (is_key_press) {
+                const char *key_string = keysym_to_string(keysym);
 
-                print_mouse_event(button_name);  // Display the button pressed
+                if (key_string != NULL) {
+                    char uppercase_key[MAX_MESSAGE_LENGTH];
+                    // Copy key_string to uppercase_key and convert to uppercase
+                    strncpy(uppercase_key, key_string, sizeof(uppercase_key));
+                    uppercase_key[sizeof(uppercase_key) - 1] = '\0'; // Ensure null termination
+
+                    for (int i = 0; uppercase_key[i]; i++) {
+                        uppercase_key[i] = toupper((unsigned char)uppercase_key[i]);
+                    }
+
+                    // Check if the key is a modifier key
+                    int is_modifier_key = (keysym == XK_Shift_L || keysym == XK_Shift_R ||
+                                           keysym == XK_Control_L || keysym == XK_Control_R ||
+                                           keysym == XK_Alt_L || keysym == XK_Alt_R ||
+                                           keysym == XK_Meta_L || keysym == XK_Meta_R);
+
+                    char modifiers_message[MAX_MESSAGE_LENGTH] = "";
+
+                    // Include specific modifiers if they are pressed and are not the current key
+                    if (ctrl_l_pressed && keysym != XK_Control_L)
+                        strncat(modifiers_message, "CONTROL_L + ", sizeof(modifiers_message) - strlen(modifiers_message) - 1);
+                    if (ctrl_r_pressed && keysym != XK_Control_R)
+                        strncat(modifiers_message, "CONTROL_R + ", sizeof(modifiers_message) - strlen(modifiers_message) - 1);
+                    if (alt_l_pressed && keysym != XK_Alt_L)
+                        strncat(modifiers_message, "ALT_L + ", sizeof(modifiers_message) - strlen(modifiers_message) - 1);
+                    if (alt_r_pressed && keysym != XK_Alt_R)
+                        strncat(modifiers_message, "ALT_R + ", sizeof(modifiers_message) - strlen(modifiers_message) - 1);
+                    if (shift_l_pressed && keysym != XK_Shift_L)
+                        strncat(modifiers_message, "SHIFT_L + ", sizeof(modifiers_message) - strlen(modifiers_message) - 1);
+                    if (shift_r_pressed && keysym != XK_Shift_R)
+                        strncat(modifiers_message, "SHIFT_R + ", sizeof(modifiers_message) - strlen(modifiers_message) - 1);
+                    if (meta_l_pressed && keysym != XK_Meta_L)
+                        strncat(modifiers_message, "META_L + ", sizeof(modifiers_message) - strlen(modifiers_message) - 1);
+                    if (meta_r_pressed && keysym != XK_Meta_R)
+                        strncat(modifiers_message, "META_R + ", sizeof(modifiers_message) - strlen(modifiers_message) - 1);
+
+                    // Add the key pressed
+                    if (!(is_modifier_key && modifiers_message[0] == '\0')) {
+                        // If the key is not a lone modifier, add it to the message
+                        strncat(modifiers_message, uppercase_key, sizeof(modifiers_message) - strlen(modifiers_message) - 1);
+                    } else {
+                        // If it's a lone modifier, just use its name
+                        strncpy(modifiers_message, uppercase_key, sizeof(modifiers_message));
+                        modifiers_message[sizeof(modifiers_message) - 1] = '\0';
+                    }
+
+                    // Handle mouse button pressed along with key
+                    if (mouse_button_pressed != 0) {
+                        const char *button_name = mouse_button_to_name(mouse_button_pressed);
+                        snprintf(message, sizeof(message), "%s + %s", button_name, modifiers_message);
+                    } else {
+                        strncpy(message, modifiers_message, sizeof(message));
+                        message[sizeof(message) - 1] = '\0'; // Ensure null termination
+                    }
+
+                    print_centered(message);
+                }
             }
         }
     }
 
-    XRecordFreeData(hook);
+    // Free the intercepted event data
+    XRecordFreeData(data);
 }
 
 int main() {
-    // Hide the cursor when the program starts
-    printf("\033[?25l");
+    // Disable the cursor when starting the program
+    disable_cursor();
 
-    Display *display;
-    XRecordContext context;
     XRecordRange *range;
     XRecordClientSpec clients;
+    Display *record_display = NULL;
+    XRecordContext context;
 
+    // Open the connection to the X server
     display = XOpenDisplay(NULL);
     if (display == NULL) {
-        fprintf(stderr, "Unable to open X display\n");
+        fprintf(stderr, "Error opening display.\n");
+        enable_cursor();
         exit(1);
     }
 
+    record_display = XOpenDisplay(NULL);
+    if (record_display == NULL) {
+        fprintf(stderr, "Error opening display for recording.\n");
+        enable_cursor();
+        XCloseDisplay(display);
+        exit(1);
+    }
+
+    // Define the range of events we want to capture (mouse and keyboard)
     range = XRecordAllocRange();
-    if (!range) {
-        fprintf(stderr, "Unable to allocate XRecord range\n");
+    if (range == NULL) {
+        fprintf(stderr, "Error allocating event range.\n");
+        enable_cursor();
+        XCloseDisplay(display);
+        XCloseDisplay(record_display);
         exit(1);
     }
-
-    // Capture only KeyPress and ButtonPress events
     range->device_events.first = KeyPress;
-    range->device_events.last = ButtonPress;
+    range->device_events.last = ButtonRelease; // Includes mouse events
 
     clients = XRecordAllClients;
 
-    // Create recording context
-    context = XRecordCreateContext(display, 0, &clients, 1, &range, 1);
+    // Create the recording context to capture events
+    context = XRecordCreateContext(record_display, 0, &clients, 1, &range, 1);
     if (!context) {
-        fprintf(stderr, "Unable to create XRecord context\n");
+        fprintf(stderr, "Error creating recording context.\n");
+        enable_cursor();
+        XFree(range);
+        XCloseDisplay(display);
+        XCloseDisplay(record_display);
         exit(1);
     }
 
-    // Enable the recording context to capture events
-    if (!XRecordEnableContext(display, context, key_event, NULL)) {
-        fprintf(stderr, "Unable to enable XRecord context\n");
+    // Enable the recording context asynchronously
+    if (!XRecordEnableContextAsync(record_display, context, event_callback, NULL)) {
+        fprintf(stderr, "Error enabling recording context.\n");
+        enable_cursor();
+        XRecordFreeContext(record_display, context);
+        XFree(range);
+        XCloseDisplay(display);
+        XCloseDisplay(record_display);
         exit(1);
     }
+
+    // Infinite loop to process events
+    while (1) {
+        XRecordProcessReplies(record_display);
+        usleep(10000);  // Small pause to avoid high CPU load
+    }
+
+    // Restore the cursor when exiting the program
+    enable_cursor();
 
     // Free resources
-    XRecordFreeContext(display, context);
+    XRecordFreeContext(record_display, context);
+    XFree(range);
     XCloseDisplay(display);
-
-    // Show the cursor again when the program exits
-    printf("\033[?25h");
+    XCloseDisplay(record_display);
 
     return 0;
 }
