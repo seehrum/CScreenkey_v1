@@ -5,16 +5,16 @@
 #include <sys/ioctl.h>
 #include <ctype.h>
 #include <X11/Xlib.h>
-#include <X11/Xproto.h>     // For xEvent
-#include <X11/XKBlib.h>     // For XkbKeycodeToKeysym
+#include <X11/Xproto.h>      // For xEvent
+#include <X11/XKBlib.h>      // For XkbKeycodeToKeysym
 #include <X11/extensions/record.h>
 #include <X11/keysym.h>
 #include <X11/X.h>
 
 #define MAX_MESSAGE_LENGTH 256
 
-static Display *display = NULL;      // Display for keyboard events
-static int mouse_button_pressed = 0; // Indicates if a mouse button is pressed
+static Display *display = NULL;         // Display for keyboard events
+static int mouse_button_pressed = 0;    // Indicates if a mouse button is pressed
 
 // Enum to represent modifier keys
 typedef enum {
@@ -40,46 +40,46 @@ typedef struct {
 
 static const KeyMap specialKeyMap[] = {
     // Modifier keys
-    {XK_Shift_L, "SHIFT_L"},
-    {XK_Shift_R, "SHIFT_R"},
+    {XK_Shift_L,   "SHIFT_L"},
+    {XK_Shift_R,   "SHIFT_R"},
     {XK_Control_L, "CONTROL_L"},
     {XK_Control_R, "CONTROL_R"},
-    {XK_Alt_L, "ALT_L"},
-    {XK_Alt_R, "ALT_R"},
-    {XK_Meta_L, "META_L"},
-    {XK_Meta_R, "META_R"},
+    {XK_Alt_L,     "ALT_L"},
+    {XK_Alt_R,     "ALT_R"},
+    {XK_Meta_L,    "META_L"},
+    {XK_Meta_R,    "META_R"},
     // Other special keys
-    {XK_apostrophe, "APOSTROPHE (')"},
-    {XK_slash, "SLASH (/)"},
-    {XK_backslash, "BACKSLASH (\\)"},
-    {XK_Left, "ARROW LEFT"},
-    {XK_Right, "ARROW RIGHT"},
-    {XK_Up, "ARROW UP"},
-    {XK_Down, "ARROW DOWN"},
-    {XK_KP_Divide, "KP_DIVIDE (/)"},
-    {XK_KP_Multiply, "KP_MULTIPLY (*)"},
-    {XK_KP_Subtract, "KP_SUBTRACT (-)"},
-    {XK_KP_Add, "KP_ADD (+)"},
-    {XK_bracketleft, "BRACKETLEFT ([)"},
-    {XK_bracketright, "BRACKETRIGHT (])"},
-    {XK_comma, "COMMA (,)"},
-    {XK_period, "PERIOD (.)"},
-    {XK_dead_acute, "DEAD_ACUTE (´)"},
-    {XK_dead_tilde, "DEAD_TILDE (~)"},
-    {XK_dead_cedilla, "DEAD_CEDILLA (Ç)"},
-    {XK_minus, "MINUS (-)"},
-    {XK_equal, "EQUAL (=)"},
-    {XK_semicolon, "SEMICOLON (;)"},
-    {XK_Page_Up, "PAGE UP"},
-    {XK_Page_Down, "PAGE DOWN"},
-    {XK_Home, "HOME"},
-    {XK_End, "END"}
+    {XK_apostrophe,     "APOSTROPHE (')"},
+    {XK_slash,          "SLASH (/)"},
+    {XK_backslash,      "BACKSLASH (\\)"},
+    {XK_Left,           "ARROW LEFT"},
+    {XK_Right,          "ARROW RIGHT"},
+    {XK_Up,             "ARROW UP"},
+    {XK_Down,           "ARROW DOWN"},
+    {XK_KP_Divide,      "KP_DIVIDE (/)"},
+    {XK_KP_Multiply,    "KP_MULTIPLY (*)"},
+    {XK_KP_Subtract,    "KP_SUBTRACT (-)"},
+    {XK_KP_Add,         "KP_ADD (+)"},
+    {XK_bracketleft,    "BRACKETLEFT ([)"},
+    {XK_bracketright,   "BRACKETRIGHT (])"},
+    {XK_comma,          "COMMA (,)"},
+    {XK_period,         "PERIOD (.)"},
+    {XK_dead_acute,     "DEAD_ACUTE (´)"},
+    {XK_dead_tilde,     "DEAD_TILDE (~)"},
+    {XK_dead_cedilla,   "DEAD_CEDILLA (Ç)"},
+    {XK_minus,          "MINUS (-)"},
+    {XK_equal,          "EQUAL (=)"},
+    {XK_semicolon,      "SEMICOLON (;)"},
+    {XK_Page_Up,        "PAGE UP"},
+    {XK_Page_Down,      "PAGE DOWN"},
+    {XK_Home,           "HOME"},
+    {XK_End,            "END"}
 };
 
 #define SPECIAL_KEY_MAP_SIZE (sizeof(specialKeyMap) / sizeof(KeyMap))
 
 // Function to get terminal size
-void get_terminal_size(int *rows, int *cols) {
+static void get_terminal_size(int *rows, int *cols) {
     struct winsize ws;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != -1) {
         *rows = ws.ws_row;
@@ -91,32 +91,32 @@ void get_terminal_size(int *rows, int *cols) {
 }
 
 // Function to disable the cursor
-void disable_cursor(void) {
+static void disable_cursor(void) {
     printf("\033[?25l");  // Hides the cursor
 }
 
 // Function to enable the cursor
-void enable_cursor(void) {
+static void enable_cursor(void) {
     printf("\033[?25h");  // Shows the cursor
 }
 
 // Function to print centered text in the terminal
-void print_centered(const char *message) {
+static void print_centered(const char *message) {
     int rows, cols;
     get_terminal_size(&rows, &cols);
 
-    int len = strlen(message);
+    int len = (int)strlen(message);
     int x = (cols - len) / 2;
     int y = rows / 2;
 
     // Clear the screen and move the cursor to the center
-    printf("\033[H\033[J");          // Clears the screen
+    printf("\033[H\033[J");               // Clears the screen
     printf("\033[%d;%dH%s\n", y, x, message);  // Moves the cursor and prints the text
-    fflush(stdout);                   // Ensures the text is displayed immediately
+    fflush(stdout);                        // Ensures the text is displayed immediately
 }
 
 // Function to convert mouse button number to name
-const char* mouse_button_to_name(int button) {
+static const char* mouse_button_to_name(int button) {
     switch (button) {
         case Button1: return "LEFT CLICK";
         case Button2: return "MIDDLE CLICK";
@@ -128,7 +128,7 @@ const char* mouse_button_to_name(int button) {
 }
 
 // Function to convert KeySym to a friendly name
-const char* keysym_to_string(KeySym keysym) {
+static const char* keysym_to_string(KeySym keysym) {
     // Check if the key is in the special key map
     for (size_t i = 0; i < SPECIAL_KEY_MAP_SIZE; i++) {
         if (specialKeyMap[i].keysym == keysym) {
@@ -140,7 +140,7 @@ const char* keysym_to_string(KeySym keysym) {
 }
 
 // Function to update modifier key state
-void update_modifier_state(KeySym keysym, int is_pressed) {
+static void update_modifier_state(KeySym keysym, int is_pressed) {
     switch (keysym) {
         case XK_Shift_L:   modifiers_state[SHIFT_L]   = is_pressed; break;
         case XK_Shift_R:   modifiers_state[SHIFT_R]   = is_pressed; break;
@@ -155,7 +155,7 @@ void update_modifier_state(KeySym keysym, int is_pressed) {
 }
 
 // Function to build the modifiers message
-void build_modifiers_message(char *modifiers_message, size_t size, KeySym current_keysym) {
+static void build_modifiers_message(char *modifiers_message, size_t size, KeySym current_keysym) {
     modifiers_message[0] = '\0'; // Ensure the string is empty
 
     for (int i = 0; i < MODIFIER_COUNT; i++) {
@@ -184,7 +184,7 @@ void build_modifiers_message(char *modifiers_message, size_t size, KeySym curren
 }
 
 // Callback function to process intercepted events
-void event_callback(XPointer priv, XRecordInterceptData *data) {
+static void event_callback(XPointer priv, XRecordInterceptData *data) {
     if (data->category != XRecordFromServer || data->data == NULL) {
         XRecordFreeData(data);
         return;
@@ -274,7 +274,7 @@ int main(void) {
     // Disable the cursor when starting the program
     disable_cursor();
 
-    XRecordRange *range;
+    XRecordRange *range = NULL;
     XRecordClientSpec clients;
     Display *record_display = NULL;
     XRecordContext context;
@@ -331,16 +331,14 @@ int main(void) {
         exit(EXIT_FAILURE);
     }
 
-    // Infinite loop to process events
+    // Main event loop
     while (1) {
         XRecordProcessReplies(record_display);
         usleep(10000); // Small pause to avoid high CPU load
     }
 
-    // Restore the cursor when exiting the program
+    // Cleanup (unreachable in this example)
     enable_cursor();
-
-    // Free resources
     XRecordFreeContext(record_display, context);
     XFree(range);
     XCloseDisplay(display);
