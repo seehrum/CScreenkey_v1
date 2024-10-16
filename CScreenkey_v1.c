@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <ctype.h>
+#include <signal.h>
 #include <X11/Xlib.h>
 #include <X11/Xproto.h>      // For xEvent
 #include <X11/XKBlib.h>      // For XkbKeycodeToKeysym
@@ -13,8 +14,15 @@
 
 #define MAX_MESSAGE_LENGTH 256
 
-static Display *display = NULL;         // Display for keyboard events
-static int mouse_button_pressed = 0;    // Indicates if a mouse button is pressed
+// Global variables
+static Display *display = NULL;             // Display for keyboard events
+static Display *record_display = NULL;      // Display for recording events
+static XRecordContext context;
+static XRecordRange *range = NULL;
+static int mouse_button_pressed = 0;        // Indicates if a mouse button is pressed
+static int use_color = 0;                   // Flag to activate/deactivate color function
+static char bg_color_name[20] = "";         // Background color name
+static char fg_color_name[20] = "";         // Foreground color name
 
 // Enum to represent modifier keys
 typedef enum {
@@ -38,6 +46,7 @@ typedef struct {
     const char *name;
 } KeyMap;
 
+// Array of special keys and their names
 static const KeyMap specialKeyMap[] = {
     // Modifier keys
     {XK_Shift_L,   "SHIFT_L"},
@@ -78,8 +87,184 @@ static const KeyMap specialKeyMap[] = {
 
 #define SPECIAL_KEY_MAP_SIZE (sizeof(specialKeyMap) / sizeof(KeyMap))
 
+// List of supported colors
+static const char *color_names[] = {
+    "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white", "default", NULL
+};
+
+// Function prototypes
+void disable_cursor(void);
+void enable_cursor(void);
+void get_terminal_size(int *rows, int *cols);
+void print_centered(const char *message);
+const char* color_name_to_code(const char *color_name, int is_background);
+const char* mouse_button_to_name(int button);
+const char* keysym_to_string(KeySym keysym);
+void update_modifier_state(KeySym keysym, int is_pressed);
+void build_modifiers_message(char *modifiers_message, size_t size, KeySym current_keysym);
+void event_callback(XPointer priv, XRecordInterceptData *data);
+void print_usage(const char *prog_name);
+void cleanup_and_exit(int signum);
+
+int main(int argc, char *argv[]) {
+    // Register signal handlers for clean exit
+    signal(SIGINT, cleanup_and_exit);
+    signal(SIGTERM, cleanup_and_exit);
+
+    // Disable the cursor when starting the program
+    disable_cursor();
+
+    XRecordClientSpec clients;
+
+    // Initialize color names with defaults
+    strcpy(bg_color_name, "default");
+    strcpy(fg_color_name, "default");
+
+    // Parse command-line arguments
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-c") == 0) {
+            use_color = 1;
+            int colors_provided = argc - i - 1; // Number of arguments after -c
+
+            if (colors_provided == 0) {
+                // No colors provided, display help
+                print_usage(argv[0]);
+            } else if (colors_provided >= 2) {
+                // User provided both background and foreground colors
+                strncpy(bg_color_name, argv[i + 1], sizeof(bg_color_name) - 1);
+                bg_color_name[sizeof(bg_color_name) - 1] = '\0';
+                strncpy(fg_color_name, argv[i + 2], sizeof(fg_color_name) - 1);
+                fg_color_name[sizeof(fg_color_name) - 1] = '\0';
+                i += 2; // Skip the next two arguments
+            } else if (colors_provided == 1) {
+                // User provided only background color
+                strncpy(bg_color_name, argv[i + 1], sizeof(bg_color_name) - 1);
+                bg_color_name[sizeof(bg_color_name) - 1] = '\0';
+                strcpy(fg_color_name, "default");
+                i += 1; // Skip the next argument
+            }
+
+            // Validate colors
+            if ((!color_name_to_code(bg_color_name, 1) && strcmp(bg_color_name, "default") != 0) ||
+                (!color_name_to_code(fg_color_name, 0) && strcmp(fg_color_name, "default") != 0)) {
+                fprintf(stderr, "Invalid color name(s) provided.\n");
+                enable_cursor();
+                exit(EXIT_FAILURE);
+            }
+        } else {
+            // Unknown option
+            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            print_usage(argv[0]);
+        }
+    }
+
+    // Open the connection to the X server
+    display = XOpenDisplay(NULL);
+    if (display == NULL) {
+        fprintf(stderr, "Error opening display.\n");
+        enable_cursor();
+        exit(EXIT_FAILURE);
+    }
+
+    record_display = XOpenDisplay(NULL);
+    if (record_display == NULL) {
+        fprintf(stderr, "Error opening display for recording.\n");
+        enable_cursor();
+        XCloseDisplay(display);
+        exit(EXIT_FAILURE);
+    }
+
+    // Define the range of events we want to capture (mouse and keyboard)
+    range = XRecordAllocRange();
+    if (range == NULL) {
+        fprintf(stderr, "Error allocating event range.\n");
+        enable_cursor();
+        XCloseDisplay(display);
+        XCloseDisplay(record_display);
+        exit(EXIT_FAILURE);
+    }
+    range->device_events.first = KeyPress;
+    range->device_events.last  = ButtonRelease; // Includes mouse events
+
+    clients = XRecordAllClients;
+
+    // Create the recording context to capture events
+    context = XRecordCreateContext(record_display, 0, &clients, 1, &range, 1);
+    if (!context) {
+        fprintf(stderr, "Error creating recording context.\n");
+        enable_cursor();
+        XFree(range);
+        XCloseDisplay(display);
+        XCloseDisplay(record_display);
+        exit(EXIT_FAILURE);
+    }
+
+    // Enable the recording context asynchronously
+    if (!XRecordEnableContextAsync(record_display, context, event_callback, NULL)) {
+        fprintf(stderr, "Error enabling recording context.\n");
+        enable_cursor();
+        XRecordFreeContext(record_display, context);
+        XFree(range);
+        XCloseDisplay(display);
+        XCloseDisplay(record_display);
+        exit(EXIT_FAILURE);
+    }
+
+    // Main event loop
+    while (1) {
+        XRecordProcessReplies(record_display);
+        usleep(10000); // Small pause to avoid high CPU load
+    }
+
+    // Cleanup (should not reach here)
+    cleanup_and_exit(0);
+
+    return EXIT_SUCCESS;
+}
+
+// Function to handle termination signals
+void cleanup_and_exit(int signum) {
+    enable_cursor();
+    if (context != 0) {
+        XRecordDisableContext(record_display, context);
+        XRecordFreeContext(record_display, context);
+    }
+    if (range != NULL) {
+        XFree(range);
+    }
+    if (display != NULL) {
+        XCloseDisplay(display);
+    }
+    if (record_display != NULL) {
+        XCloseDisplay(record_display);
+    }
+    exit(EXIT_SUCCESS);
+}
+
+// Function to print usage instructions
+void print_usage(const char *prog_name) {
+    printf("Usage: %s [-c bg_color fg_color]\n", prog_name);
+    printf("Available colors: black, red, green, yellow, blue, magenta, cyan, white, default\n");
+    printf("Examples:\n");
+    printf("  %s -c red blue       # Background red, foreground blue\n", prog_name);
+    printf("  %s -c red default    # Background red, foreground default\n", prog_name);
+    printf("  %s -c default green  # Background default, foreground green\n", prog_name);
+    printf("  %s -c                # Display this help message\n", prog_name);
+    exit(EXIT_SUCCESS);
+}
+
+// Function to disable the cursor
+void disable_cursor(void) {
+    printf("\033[?25l");  // Hides the cursor
+}
+
+// Function to enable the cursor
+void enable_cursor(void) {
+    printf("\033[?25h");  // Shows the cursor
+}
+
 // Function to get terminal size
-static void get_terminal_size(int *rows, int *cols) {
+void get_terminal_size(int *rows, int *cols) {
     struct winsize ws;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != -1) {
         *rows = ws.ws_row;
@@ -90,33 +275,86 @@ static void get_terminal_size(int *rows, int *cols) {
     }
 }
 
-// Function to disable the cursor
-static void disable_cursor(void) {
-    printf("\033[?25l");  // Hides the cursor
-}
-
-// Function to enable the cursor
-static void enable_cursor(void) {
-    printf("\033[?25h");  // Shows the cursor
+// Function to map color names to ANSI codes
+const char* color_name_to_code(const char *color_name, int is_background) {
+    if (strcmp(color_name, "black") == 0) {
+        return is_background ? "\033[40m" : "\033[30m";
+    } else if (strcmp(color_name, "red") == 0) {
+        return is_background ? "\033[41m" : "\033[31m";
+    } else if (strcmp(color_name, "green") == 0) {
+        return is_background ? "\033[42m" : "\033[32m";
+    } else if (strcmp(color_name, "yellow") == 0) {
+        return is_background ? "\033[43m" : "\033[33m";
+    } else if (strcmp(color_name, "blue") == 0) {
+        return is_background ? "\033[44m" : "\033[34m";
+    } else if (strcmp(color_name, "magenta") == 0) {
+        return is_background ? "\033[45m" : "\033[35m";
+    } else if (strcmp(color_name, "cyan") == 0) {
+        return is_background ? "\033[46m" : "\033[36m";
+    } else if (strcmp(color_name, "white") == 0) {
+        return is_background ? "\033[47m" : "\033[37m";
+    } else if (strcmp(color_name, "default") == 0) {
+        return is_background ? "\033[49m" : "\033[39m";
+    } else {
+        return NULL; // Invalid color
+    }
 }
 
 // Function to print centered text in the terminal
-static void print_centered(const char *message) {
+void print_centered(const char *message) {
     int rows, cols;
+    static int color_toggle = 0;  // Static variable to keep track of color toggling
+
     get_terminal_size(&rows, &cols);
 
     int len = (int)strlen(message);
     int x = (cols - len) / 2;
     int y = rows / 2;
 
-    // Clear the screen and move the cursor to the center
-    printf("\033[H\033[J");               // Clears the screen
-    printf("\033[%d;%dH%s\n", y, x, message);  // Moves the cursor and prints the text
-    fflush(stdout);                        // Ensures the text is displayed immediately
+    // Clear the screen
+    printf("\033[H\033[J");  // Clears the screen
+
+    // Move the cursor to the position
+    printf("\033[%d;%dH", y, x);
+
+    // Check if color function is activated
+    if (use_color) {
+        const char *bg_color_code;
+        const char *fg_color_code;
+
+        if (color_toggle) {
+            // Swap background and foreground colors to create blinking effect
+            bg_color_code = color_name_to_code(fg_color_name, 1);
+            fg_color_code = color_name_to_code(bg_color_name, 0);
+        } else {
+            bg_color_code = color_name_to_code(bg_color_name, 1);
+            fg_color_code = color_name_to_code(fg_color_name, 0);
+        }
+
+        // Apply background color if valid
+        if (bg_color_code) {
+            printf("%s", bg_color_code);
+        }
+
+        // Apply foreground color if valid
+        if (fg_color_code) {
+            printf("%s", fg_color_code);
+        }
+
+        // Toggle color for next time
+        color_toggle = !color_toggle;
+    }
+
+    printf("%s", message);  // Prints the text
+
+    // Reset attributes
+    printf("\033[0m\n");
+
+    fflush(stdout);  // Ensures the text is displayed immediately
 }
 
 // Function to convert mouse button number to name
-static const char* mouse_button_to_name(int button) {
+const char* mouse_button_to_name(int button) {
     switch (button) {
         case Button1: return "LEFT CLICK";
         case Button2: return "MIDDLE CLICK";
@@ -128,7 +366,7 @@ static const char* mouse_button_to_name(int button) {
 }
 
 // Function to convert KeySym to a friendly name
-static const char* keysym_to_string(KeySym keysym) {
+const char* keysym_to_string(KeySym keysym) {
     // Check if the key is in the special key map
     for (size_t i = 0; i < SPECIAL_KEY_MAP_SIZE; i++) {
         if (specialKeyMap[i].keysym == keysym) {
@@ -140,7 +378,7 @@ static const char* keysym_to_string(KeySym keysym) {
 }
 
 // Function to update modifier key state
-static void update_modifier_state(KeySym keysym, int is_pressed) {
+void update_modifier_state(KeySym keysym, int is_pressed) {
     switch (keysym) {
         case XK_Shift_L:   modifiers_state[SHIFT_L]   = is_pressed; break;
         case XK_Shift_R:   modifiers_state[SHIFT_R]   = is_pressed; break;
@@ -155,7 +393,7 @@ static void update_modifier_state(KeySym keysym, int is_pressed) {
 }
 
 // Function to build the modifiers message
-static void build_modifiers_message(char *modifiers_message, size_t size, KeySym current_keysym) {
+void build_modifiers_message(char *modifiers_message, size_t size, KeySym current_keysym) {
     modifiers_message[0] = '\0'; // Ensure the string is empty
 
     for (int i = 0; i < MODIFIER_COUNT; i++) {
@@ -184,7 +422,7 @@ static void build_modifiers_message(char *modifiers_message, size_t size, KeySym
 }
 
 // Callback function to process intercepted events
-static void event_callback(XPointer priv, XRecordInterceptData *data) {
+void event_callback(XPointer priv, XRecordInterceptData *data) {
     if (data->category != XRecordFromServer || data->data == NULL) {
         XRecordFreeData(data);
         return;
@@ -268,81 +506,4 @@ static void event_callback(XPointer priv, XRecordInterceptData *data) {
 
     // Free the intercepted event data
     XRecordFreeData(data);
-}
-
-int main(void) {
-    // Disable the cursor when starting the program
-    disable_cursor();
-
-    XRecordRange *range = NULL;
-    XRecordClientSpec clients;
-    Display *record_display = NULL;
-    XRecordContext context;
-
-    // Open the connection to the X server
-    display = XOpenDisplay(NULL);
-    if (display == NULL) {
-        fprintf(stderr, "Error opening display.\n");
-        enable_cursor();
-        exit(EXIT_FAILURE);
-    }
-
-    record_display = XOpenDisplay(NULL);
-    if (record_display == NULL) {
-        fprintf(stderr, "Error opening display for recording.\n");
-        enable_cursor();
-        XCloseDisplay(display);
-        exit(EXIT_FAILURE);
-    }
-
-    // Define the range of events we want to capture (mouse and keyboard)
-    range = XRecordAllocRange();
-    if (range == NULL) {
-        fprintf(stderr, "Error allocating event range.\n");
-        enable_cursor();
-        XCloseDisplay(display);
-        XCloseDisplay(record_display);
-        exit(EXIT_FAILURE);
-    }
-    range->device_events.first = KeyPress;
-    range->device_events.last  = ButtonRelease; // Includes mouse events
-
-    clients = XRecordAllClients;
-
-    // Create the recording context to capture events
-    context = XRecordCreateContext(record_display, 0, &clients, 1, &range, 1);
-    if (!context) {
-        fprintf(stderr, "Error creating recording context.\n");
-        enable_cursor();
-        XFree(range);
-        XCloseDisplay(display);
-        XCloseDisplay(record_display);
-        exit(EXIT_FAILURE);
-    }
-
-    // Enable the recording context asynchronously
-    if (!XRecordEnableContextAsync(record_display, context, event_callback, NULL)) {
-        fprintf(stderr, "Error enabling recording context.\n");
-        enable_cursor();
-        XRecordFreeContext(record_display, context);
-        XFree(range);
-        XCloseDisplay(display);
-        XCloseDisplay(record_display);
-        exit(EXIT_FAILURE);
-    }
-
-    // Main event loop
-    while (1) {
-        XRecordProcessReplies(record_display);
-        usleep(10000); // Small pause to avoid high CPU load
-    }
-
-    // Cleanup (unreachable in this example)
-    enable_cursor();
-    XRecordFreeContext(record_display, context);
-    XFree(range);
-    XCloseDisplay(display);
-    XCloseDisplay(record_display);
-
-    return EXIT_SUCCESS;
 }
