@@ -1,53 +1,96 @@
-## CScreenkey_v1
 
-### Description:
-This program captures keyboard and mouse events in a Linux environment using the X11 library and the XTest extension. It detects and displays keys or mouse buttons pressed, including special keys (e.g., arrow keys, page up/down) and mouse clicks. The captured events are displayed in the terminal, with the key or button name being centered on the screen.
+# TermKey
 
-### Features:
-- Captures keyboard key presses and releases.
-- Detects and displays special keys (e.g., arrow keys, page up, page down).
-- Captures mouse button presses and releases.
-- Displays the key/button pressed centered in the terminal.
-- Supports modifier keys (Control, Shift, Alt) and shows key combinations.
+TermKey is a Unix-based program that captures and processes keyboard and mouse events using the X11 system, displaying these events in the terminal. This tool is highly useful for logging input events in real-time, with optional color-coded display for improved visual feedback.
 
-### Prerequisites:
-- **Linux environment** with X11 display system.
-- **X11 development libraries** (`libX11`, `libXtst`).
-  
-  You can install the required libraries using the following command (on Debian/Ubuntu-based systems):
-  ```bash
-  sudo apt-get install libx11-dev libxtst-dev
-  ```
+## Features
 
-### Compilation:
-To compile the program, use the following `gcc` command:
+- **Real-Time Event Capture**: Captures and logs both keyboard and mouse events in real-time.
+- **Color-Coded Display**: Optional background and foreground colors for enhanced visibility of events.
+- **Support for Special Keys**: Recognizes and maps special keys such as Shift, Control, Alt, Meta, and more.
+- **Customizable Output**: Choose your preferred colors for background and foreground, with a list of supported colors.
+- **Minimal System Resource Usage**: Designed to run efficiently with low CPU usage.
+
+## Requirements
+
+To build and run TermKey, you will need the following dependencies installed on your system:
+
+- X11 development libraries (`libx11-dev`, `libxkbfile-dev`)
+
+On Debian-based systems (like Ubuntu), you can install them with:
 
 ```bash
-gcc CScreenkey_v1.c -o screenkey -lX11 -lXtst
+sudo apt-get install libx11-dev libxkbfile-dev
 ```
 
-### Usage:
-1. **Run the compiled executable:**
+## Building TermKey
+
+1. Clone the repository or download the source code.
+2. Compile the code using GCC:
+
+```bash
+gcc -o termkey termkey.c -lX11 -lXtst
+```
+
+This will create an executable file called `termkey`.
+
+## Usage
+
+Run the program from the terminal:
+
+```bash
+./termkey [-c bg_color fg_color]
+```
+
+- `bg_color`: Background color
+- `fg_color`: Foreground color
+
+### Example Commands:
+
+1. **Set Background to Red and Foreground to Blue**:
    ```bash
-   ./screenkey
+   ./termkey -c red blue
    ```
-2. The program will start capturing and displaying key presses and mouse clicks in the terminal.
-3. Press **Ctrl+C** to stop the program.
 
-### Special Keys Mapped:
-- Arrow keys: Left, Right, Up, Down.
-- Keypad: Add, Subtract, Multiply, Divide.
-- Brackets: Left ([), Right (]).
-- Other symbols: Apostrophe, Slash, Backslash, Comma, Period, Semicolon, etc.
-- Modifier keys: Control, Shift, Alt.
-- Mouse buttons: Left, Middle, Right, Mouse Wheel Up, Mouse Wheel Down.
+2. **Set Background to Red and Foreground to Default**:
+   ```bash
+   ./termkey -c red default
+   ```
 
-### Files:
-- `CScreenkey_v1.c`: The main C source code file.
+3. **Set Background to Default and Foreground to Green**:
+   ```bash
+   ./termkey -c default green
+   ```
 
-### Limitations:
-- This program is designed to work only in Linux environments with X11 support.
-- It does not support other operating systems or windowing systems like Wayland or Windows.
+### Supported Colors
 
-### License:
-MIT License
+The following colors are supported for both background and foreground:
+
+- `black`
+- `red`
+- `green`
+- `yellow`
+- `blue`
+- `magenta`
+- `cyan`
+- `white`
+- `default`
+
+## Program Behavior
+
+- **Key Logging**: Captures key presses, including special keys and modifier keys, and displays them in real-time.
+- **Mouse Events**: Captures mouse clicks and wheel movements.
+- **Centered Output**: Displays the captured event centrally within the terminal window for easy visibility.
+- **Cursor Control**: Hides the cursor during program execution to prevent clutter and re-enables it upon exit.
+
+## Signal Handling
+
+TermKey gracefully handles termination signals like `SIGINT` (Ctrl+C) or `SIGTERM`. Upon receiving these signals, the program will:
+
+- Re-enable the terminal cursor.
+- Close X11 connections properly.
+- Exit the program without leaving the terminal in an inconsistent state.
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
