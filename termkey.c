@@ -6,8 +6,8 @@
 #include <ctype.h>
 #include <signal.h>
 #include <X11/Xlib.h>
-#include <X11/Xproto.h>      // For xEvent
-#include <X11/XKBlib.h>      // For XkbKeycodeToKeysym
+#include <X11/Xproto.h>          // For xEvent
+#include <X11/XKBlib.h>          // For XkbKeycodeToKeysym
 #include <X11/extensions/record.h>
 #include <X11/keysym.h>
 #include <X11/X.h>
@@ -15,20 +15,20 @@
 #define MAX_MESSAGE_LENGTH 256
 
 // Global variables
-static Display *display = NULL;             // Display for keyboard events
-static Display *record_display = NULL;      // Display for recording events
-static XRecordContext context;
-static XRecordRange *range = NULL;
-static int mouse_button_pressed = 0;        // Indicates if a mouse button is pressed
-static int use_color = 0;                   // Flag to activate/deactivate color function
-static char bg_color_name[20] = "";         // Background color name
-static char fg_color_name[20] = "";         // Foreground color name
-static char letter_color_name[20] = "";     // Letter color name
+static Display *display = NULL;                // Display for keyboard events
+static Display *record_display = NULL;         // Display for recording events
+static XRecordContext record_context;
+static XRecordRange *record_range = NULL;
+static int mouse_button_pressed = 0;           // Indicates if a mouse button is pressed
+static int use_color = 0;                      // Flag to activate/deactivate color function
+static char bg_color_name[20] = "default";     // Background color name
+static char fg_color_name[20] = "default";     // Foreground color name
+static char letter_color_name[20] = "";        // Letter color name
 
 // Variables for terminal resizing and exit
 static volatile sig_atomic_t terminal_resized = 0; // Flag to indicate terminal resize
 static volatile sig_atomic_t exit_requested = 0;   // Flag to indicate exit requested
-static char last_message[MAX_MESSAGE_LENGTH * 2 + 10] = ""; // Store the last displayed message
+static char last_message[MAX_MESSAGE_LENGTH * 2 + 10] = "Termkey"; // Store the last displayed message
 
 // Enum to represent modifier keys
 typedef enum {
@@ -41,6 +41,8 @@ typedef enum {
     META_L,
     META_R,
     ALTGR,
+    SUPER_L,
+    SUPER_R,
     MODIFIER_COUNT
 } ModifierKey;
 
@@ -54,7 +56,7 @@ typedef struct {
 } KeyMap;
 
 // Array of special keys and their names
-static const KeyMap specialKeyMap[] = {
+static const KeyMap special_key_map[] = {
     // Modifier keys
     {XK_Shift_L,          "SHIFT_L"},
     {XK_Shift_R,          "SHIFT_R"},
@@ -65,6 +67,8 @@ static const KeyMap specialKeyMap[] = {
     {XK_Meta_L,           "META_L"},
     {XK_Meta_R,           "META_R"},
     {XK_ISO_Level3_Shift, "ALTGR"},
+    {XK_Super_L,          "SUPER_L"},
+    {XK_Super_R,          "SUPER_R"},
     // Other special keys
     {XK_apostrophe,     "APOSTROPHE (')"},
     {XK_slash,          "SLASH (/)"},
@@ -93,7 +97,7 @@ static const KeyMap specialKeyMap[] = {
     {XK_End,            "END"}
 };
 
-#define SPECIAL_KEY_MAP_SIZE (sizeof(specialKeyMap) / sizeof(KeyMap))
+#define SPECIAL_KEY_MAP_SIZE (sizeof(special_key_map) / sizeof(KeyMap))
 
 // List of supported colors
 static const char *color_names[] = {
@@ -114,21 +118,21 @@ void event_callback(XPointer priv, XRecordInterceptData *data);
 void print_usage(const char *prog_name);
 void signal_handler(int signum);
 void handle_resize(int signum);
+void cleanup(void);
 
 int main(int argc, char *argv[]) {
     // Register signal handlers for clean exit and terminal resize
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-    signal(SIGWINCH, handle_resize); // Handle terminal resize
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signal_handler;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+
+    sa.sa_handler = handle_resize;
+    sigaction(SIGWINCH, &sa, NULL);
 
     // Disable the cursor when starting the program
     disable_cursor();
-
-    XRecordClientSpec clients;
-
-    // Initialize color names with defaults
-    strcpy(bg_color_name, "default");
-    strcpy(fg_color_name, "default");
 
     // Parse command-line arguments
     for (int i = 1; i < argc; i++) {
@@ -142,24 +146,18 @@ int main(int argc, char *argv[]) {
             } else if (colors_provided >= 3) {
                 // User provided background, foreground, and letter colors
                 strncpy(bg_color_name, argv[i + 1], sizeof(bg_color_name) - 1);
-                bg_color_name[sizeof(bg_color_name) - 1] = '\0';
                 strncpy(fg_color_name, argv[i + 2], sizeof(fg_color_name) - 1);
-                fg_color_name[sizeof(fg_color_name) - 1] = '\0';
                 strncpy(letter_color_name, argv[i + 3], sizeof(letter_color_name) - 1);
-                letter_color_name[sizeof(letter_color_name) - 1] = '\0';
                 i += 3; // Skip the next three arguments
             } else if (colors_provided == 2) {
                 // User provided background and foreground colors
                 strncpy(bg_color_name, argv[i + 1], sizeof(bg_color_name) - 1);
-                bg_color_name[sizeof(bg_color_name) - 1] = '\0';
                 strncpy(fg_color_name, argv[i + 2], sizeof(fg_color_name) - 1);
-                fg_color_name[sizeof(fg_color_name) - 1] = '\0';
                 letter_color_name[0] = '\0'; // No letter color
                 i += 2; // Skip the next two arguments
             } else if (colors_provided == 1) {
                 // User provided only background color
                 strncpy(bg_color_name, argv[i + 1], sizeof(bg_color_name) - 1);
-                bg_color_name[sizeof(bg_color_name) - 1] = '\0';
                 strcpy(fg_color_name, "default");
                 letter_color_name[0] = '\0'; // No letter color
                 i += 1; // Skip the next argument
@@ -169,11 +167,13 @@ int main(int argc, char *argv[]) {
             }
 
             // Validate colors
-            if ((!color_name_to_code(bg_color_name, 1) && strcmp(bg_color_name, "default") != 0) ||
-                (!color_name_to_code(fg_color_name, 0) && strcmp(fg_color_name, "default") != 0) ||
-                (letter_color_name[0] != '\0' && !color_name_to_code(letter_color_name, 0) && strcmp(letter_color_name, "default") != 0)) {
+            if ((color_name_to_code(bg_color_name, 1) == NULL && strcmp(bg_color_name, "default") != 0) ||
+                (color_name_to_code(fg_color_name, 0) == NULL && strcmp(fg_color_name, "default") != 0) ||
+                (letter_color_name[0] != '\0' &&
+                 color_name_to_code(letter_color_name, 0) == NULL &&
+                 strcmp(letter_color_name, "default") != 0)) {
                 fprintf(stderr, "Invalid color name(s) provided.\n");
-                enable_cursor();
+                cleanup();
                 exit(EXIT_FAILURE);
             }
         } else {
@@ -187,62 +187,52 @@ int main(int argc, char *argv[]) {
     display = XOpenDisplay(NULL);
     if (display == NULL) {
         fprintf(stderr, "Error opening display.\n");
-        enable_cursor();
+        cleanup();
         exit(EXIT_FAILURE);
     }
 
     record_display = XOpenDisplay(NULL);
     if (record_display == NULL) {
         fprintf(stderr, "Error opening display for recording.\n");
-        enable_cursor();
-        XCloseDisplay(display);
+        cleanup();
         exit(EXIT_FAILURE);
     }
 
     // Define the range of events we want to capture (mouse and keyboard)
-    range = XRecordAllocRange();
-    if (range == NULL) {
+    record_range = XRecordAllocRange();
+    if (record_range == NULL) {
         fprintf(stderr, "Error allocating event range.\n");
-        enable_cursor();
-        XCloseDisplay(display);
-        XCloseDisplay(record_display);
+        cleanup();
         exit(EXIT_FAILURE);
     }
-    range->device_events.first = KeyPress;
-    range->device_events.last  = ButtonRelease; // Includes mouse events
+    record_range->device_events.first = KeyPress;
+    record_range->device_events.last  = ButtonRelease; // Includes mouse events
 
-    clients = XRecordAllClients;
+    XRecordClientSpec clients = XRecordAllClients;
 
     // Create the recording context to capture events
-    context = XRecordCreateContext(record_display, 0, &clients, 1, &range, 1);
-    if (!context) {
+    record_context = XRecordCreateContext(record_display, 0, &clients, 1, &record_range, 1);
+    if (!record_context) {
         fprintf(stderr, "Error creating recording context.\n");
-        enable_cursor();
-        XFree(range);
-        XCloseDisplay(display);
-        XCloseDisplay(record_display);
+        cleanup();
         exit(EXIT_FAILURE);
     }
 
     // Display "Termkey" at startup
-    strncpy(last_message, "Termkey", sizeof(last_message));
-    last_message[sizeof(last_message) - 1] = '\0'; // Ensure null termination
     print_centered(last_message);
 
     // Enable the recording context asynchronously
-    if (!XRecordEnableContextAsync(record_display, context, event_callback, NULL)) {
+    if (!XRecordEnableContextAsync(record_display, record_context, event_callback, NULL)) {
         fprintf(stderr, "Error enabling recording context.\n");
-        enable_cursor();
-        XRecordFreeContext(record_display, context);
-        XFree(range);
-        XCloseDisplay(display);
-        XCloseDisplay(record_display);
+        cleanup();
         exit(EXIT_FAILURE);
     }
 
     // Main event loop
     while (!exit_requested) {
-        XRecordProcessReplies(record_display);
+        if (XPending(record_display)) {
+            XRecordProcessReplies(record_display);
+        }
 
         // Check if terminal was resized
         if (terminal_resized) {
@@ -254,34 +244,41 @@ int main(int argc, char *argv[]) {
     }
 
     // Cleanup before exit
+    cleanup();
+    system("reset");
+
+    return EXIT_SUCCESS;
+}
+
+// Function to clean up resources
+void cleanup(void) {
     enable_cursor();
-    if (context != 0) {
-        XRecordDisableContext(record_display, context);
-        XRecordFreeContext(record_display, context);
+    if (record_context != 0) {
+        XRecordDisableContext(record_display, record_context);
+        XRecordFreeContext(record_display, record_context);
     }
-    if (range != NULL) {
-        XFree(range);
+    if (record_range != NULL) {
+        XFree(record_range);
     }
     if (display != NULL) {
         XCloseDisplay(display);
+        display = NULL;
     }
     if (record_display != NULL) {
         XCloseDisplay(record_display);
+        record_display = NULL;
     }
-
-    // Reset the terminal
-    system("reset");
-
-    exit(EXIT_SUCCESS);
 }
 
 // Signal handler to set exit flag
 void signal_handler(int signum) {
+    (void)signum; // Unused parameter
     exit_requested = 1;
 }
 
 // Function to handle terminal resize signals
 void handle_resize(int signum) {
+    (void)signum; // Unused parameter
     terminal_resized = 1; // Set the flag to indicate terminal was resized
 }
 
@@ -324,27 +321,29 @@ void get_terminal_size(int *rows, int *cols) {
 
 // Function to map color names to ANSI codes
 const char* color_name_to_code(const char *color_name, int is_background) {
-    if (strcmp(color_name, "black") == 0) {
-        return is_background ? "\033[40m" : "\033[30m";
-    } else if (strcmp(color_name, "red") == 0) {
-        return is_background ? "\033[41m" : "\033[31m";
-    } else if (strcmp(color_name, "green") == 0) {
-        return is_background ? "\033[42m" : "\033[32m";
-    } else if (strcmp(color_name, "yellow") == 0) {
-        return is_background ? "\033[43m" : "\033[33m";
-    } else if (strcmp(color_name, "blue") == 0) {
-        return is_background ? "\033[44m" : "\033[34m";
-    } else if (strcmp(color_name, "magenta") == 0) {
-        return is_background ? "\033[45m" : "\033[35m";
-    } else if (strcmp(color_name, "cyan") == 0) {
-        return is_background ? "\033[46m" : "\033[36m";
-    } else if (strcmp(color_name, "white") == 0) {
-        return is_background ? "\033[47m" : "\033[37m";
-    } else if (strcmp(color_name, "default") == 0) {
-        return is_background ? "\033[49m" : "\033[39m";
-    } else {
-        return NULL; // Invalid color
+    static const struct {
+        const char *name;
+        const char *code_fg;
+        const char *code_bg;
+    } color_table[] = {
+        {"black",   "\033[30m", "\033[40m"},
+        {"red",     "\033[31m", "\033[41m"},
+        {"green",   "\033[32m", "\033[42m"},
+        {"yellow",  "\033[33m", "\033[43m"},
+        {"blue",    "\033[34m", "\033[44m"},
+        {"magenta", "\033[35m", "\033[45m"},
+        {"cyan",    "\033[36m", "\033[46m"},
+        {"white",   "\033[37m", "\033[47m"},
+        {"default", "\033[39m", "\033[49m"},
+        {NULL,      NULL,       NULL}
+    };
+
+    for (int i = 0; color_table[i].name != NULL; i++) {
+        if (strcmp(color_name, color_table[i].name) == 0) {
+            return is_background ? color_table[i].code_bg : color_table[i].code_fg;
+        }
     }
+    return NULL; // Invalid color
 }
 
 // Function to print centered text in the terminal
@@ -394,7 +393,7 @@ void print_centered(const char *message) {
             char c = message[i];
 
             if (isgraph((unsigned char)c) && letter_color_code) {
-                // Apply letter color to all printable characters except space
+                // Apply letter color to all printable characters
                 printf("%s", letter_color_code);
             } else if (fg_color_code) {
                 // Apply foreground color
@@ -438,8 +437,8 @@ const char* mouse_button_to_name(int button) {
 const char* keysym_to_string(KeySym keysym) {
     // Check if the key is in the special key map
     for (size_t i = 0; i < SPECIAL_KEY_MAP_SIZE; i++) {
-        if (specialKeyMap[i].keysym == keysym) {
-            return specialKeyMap[i].name;
+        if (special_key_map[i].keysym == keysym) {
+            return special_key_map[i].name;
         }
     }
     // If not, convert to default string
@@ -458,6 +457,8 @@ void update_modifier_state(KeySym keysym, int is_pressed) {
         case XK_Meta_L:           modifiers_state[META_L]    = is_pressed; break;
         case XK_Meta_R:           modifiers_state[META_R]    = is_pressed; break;
         case XK_ISO_Level3_Shift: modifiers_state[ALTGR]     = is_pressed; break;
+        case XK_Super_L:          modifiers_state[SUPER_L]   = is_pressed; break;
+        case XK_Super_R:          modifiers_state[SUPER_R]   = is_pressed; break;
         default: break;
     }
 }
@@ -479,6 +480,8 @@ void build_modifiers_message(char *modifiers_message, size_t size, KeySym curren
                 case META_L:    modifier_keysym = XK_Meta_L;           break;
                 case META_R:    modifier_keysym = XK_Meta_R;           break;
                 case ALTGR:     modifier_keysym = XK_ISO_Level3_Shift; break;
+                case SUPER_L:   modifier_keysym = XK_Super_L;          break;
+                case SUPER_R:   modifier_keysym = XK_Super_R;          break;
                 default: continue;
             }
             if (modifier_keysym != current_keysym) {
@@ -494,6 +497,7 @@ void build_modifiers_message(char *modifiers_message, size_t size, KeySym curren
 
 // Callback function to process intercepted events
 void event_callback(XPointer priv, XRecordInterceptData *data) {
+    (void)priv; // Unused parameter
     if (data->category != XRecordFromServer || data->data == NULL) {
         XRecordFreeData(data);
         return;
@@ -531,7 +535,7 @@ void event_callback(XPointer priv, XRecordInterceptData *data) {
             if (key_string != NULL) {
                 char uppercase_key[MAX_MESSAGE_LENGTH];
                 // Copy key_string to uppercase_key and convert to uppercase
-                strncpy(uppercase_key, key_string, sizeof(uppercase_key));
+                strncpy(uppercase_key, key_string, sizeof(uppercase_key) - 1);
                 uppercase_key[sizeof(uppercase_key) - 1] = '\0'; // Ensure null termination
 
                 for (int i = 0; uppercase_key[i]; i++) {
@@ -543,7 +547,8 @@ void event_callback(XPointer priv, XRecordInterceptData *data) {
                                        keysym == XK_Control_L || keysym == XK_Control_R ||
                                        keysym == XK_Alt_L || keysym == XK_Alt_R ||
                                        keysym == XK_Meta_L || keysym == XK_Meta_R ||
-                                       keysym == XK_ISO_Level3_Shift);
+                                       keysym == XK_ISO_Level3_Shift ||
+                                       keysym == XK_Super_L || keysym == XK_Super_R);
 
                 char modifiers_message[MAX_MESSAGE_LENGTH];
                 build_modifiers_message(modifiers_message, sizeof(modifiers_message), keysym);
@@ -554,12 +559,12 @@ void event_callback(XPointer priv, XRecordInterceptData *data) {
                     if (modifiers_message[0] != '\0') {
                         strncat(modifiers_message, uppercase_key, sizeof(modifiers_message) - strlen(modifiers_message) - 1);
                     } else {
-                        strncpy(modifiers_message, uppercase_key, sizeof(modifiers_message));
-                        modifiers_message[sizeof(modifiers_message) - 1] = '\0';
+                        strncpy(modifiers_message, uppercase_key, sizeof(modifiers_message) - 1);
                     }
+                    modifiers_message[sizeof(modifiers_message) - 1] = '\0'; // Ensure null termination
                 } else {
                     // If it's a lone modifier, just use its name
-                    strncpy(modifiers_message, uppercase_key, sizeof(modifiers_message));
+                    strncpy(modifiers_message, uppercase_key, sizeof(modifiers_message) - 1);
                     modifiers_message[sizeof(modifiers_message) - 1] = '\0';
                 }
 
@@ -568,11 +573,12 @@ void event_callback(XPointer priv, XRecordInterceptData *data) {
                     const char *button_name = mouse_button_to_name(mouse_button_pressed);
                     snprintf(message, sizeof(message), "%s + %s", button_name, modifiers_message);
                 } else {
-                    strncpy(message, modifiers_message, sizeof(message));
+                    strncpy(message, modifiers_message, sizeof(message) - 1);
                     message[sizeof(message) - 1] = '\0'; // Ensure null termination
                 }
 
-                strncpy(last_message, message, sizeof(last_message)); // Store the message
+                strncpy(last_message, message, sizeof(last_message) - 1); // Store the message
+                last_message[sizeof(last_message) - 1] = '\0'; // Ensure null termination
                 print_centered(message);
             }
         }
