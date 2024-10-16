@@ -25,8 +25,9 @@ static char bg_color_name[20] = "";         // Background color name
 static char fg_color_name[20] = "";         // Foreground color name
 static char letter_color_name[20] = "";     // Letter color name
 
-// Variables for terminal resizing
+// Variables for terminal resizing and exit
 static volatile sig_atomic_t terminal_resized = 0; // Flag to indicate terminal resize
+static volatile sig_atomic_t exit_requested = 0;   // Flag to indicate exit requested
 static char last_message[MAX_MESSAGE_LENGTH * 2 + 10] = ""; // Store the last displayed message
 
 // Enum to represent modifier keys
@@ -111,13 +112,13 @@ void update_modifier_state(KeySym keysym, int is_pressed);
 void build_modifiers_message(char *modifiers_message, size_t size, KeySym current_keysym);
 void event_callback(XPointer priv, XRecordInterceptData *data);
 void print_usage(const char *prog_name);
-void cleanup_and_exit(int signum);
+void signal_handler(int signum);
 void handle_resize(int signum);
 
 int main(int argc, char *argv[]) {
     // Register signal handlers for clean exit and terminal resize
-    signal(SIGINT, cleanup_and_exit);
-    signal(SIGTERM, cleanup_and_exit);
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
     signal(SIGWINCH, handle_resize); // Handle terminal resize
 
     // Disable the cursor when starting the program
@@ -240,7 +241,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Main event loop
-    while (1) {
+    while (!exit_requested) {
         XRecordProcessReplies(record_display);
 
         // Check if terminal was resized
@@ -252,14 +253,7 @@ int main(int argc, char *argv[]) {
         usleep(10000); // Small pause to avoid high CPU load
     }
 
-    // Cleanup (should not reach here)
-    cleanup_and_exit(0);
-
-    return EXIT_SUCCESS;
-}
-
-// Function to handle termination signals
-void cleanup_and_exit(int signum) {
+    // Cleanup before exit
     enable_cursor();
     if (context != 0) {
         XRecordDisableContext(record_display, context);
@@ -279,6 +273,11 @@ void cleanup_and_exit(int signum) {
     system("reset");
 
     exit(EXIT_SUCCESS);
+}
+
+// Signal handler to set exit flag
+void signal_handler(int signum) {
+    exit_requested = 1;
 }
 
 // Function to handle terminal resize signals
@@ -302,11 +301,13 @@ void print_usage(const char *prog_name) {
 // Function to disable the cursor
 void disable_cursor(void) {
     printf("\033[?25l");  // Hides the cursor
+    fflush(stdout);
 }
 
 // Function to enable the cursor
 void enable_cursor(void) {
     printf("\033[?25h");  // Shows the cursor
+    fflush(stdout);
 }
 
 // Function to get terminal size
