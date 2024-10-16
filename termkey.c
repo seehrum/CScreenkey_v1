@@ -23,6 +23,7 @@ static int mouse_button_pressed = 0;        // Indicates if a mouse button is pr
 static int use_color = 0;                   // Flag to activate/deactivate color function
 static char bg_color_name[20] = "";         // Background color name
 static char fg_color_name[20] = "";         // Foreground color name
+static char letter_color_name[20] = "";     // Letter color name
 
 // Variables for terminal resizing
 static volatile sig_atomic_t terminal_resized = 0; // Flag to indicate terminal resize
@@ -137,24 +138,39 @@ int main(int argc, char *argv[]) {
             if (colors_provided == 0) {
                 // No colors provided, display help
                 print_usage(argv[0]);
-            } else if (colors_provided >= 2) {
-                // User provided both background and foreground colors
+            } else if (colors_provided >= 3) {
+                // User provided background, foreground, and letter colors
                 strncpy(bg_color_name, argv[i + 1], sizeof(bg_color_name) - 1);
                 bg_color_name[sizeof(bg_color_name) - 1] = '\0';
                 strncpy(fg_color_name, argv[i + 2], sizeof(fg_color_name) - 1);
                 fg_color_name[sizeof(fg_color_name) - 1] = '\0';
+                strncpy(letter_color_name, argv[i + 3], sizeof(letter_color_name) - 1);
+                letter_color_name[sizeof(letter_color_name) - 1] = '\0';
+                i += 3; // Skip the next three arguments
+            } else if (colors_provided == 2) {
+                // User provided background and foreground colors
+                strncpy(bg_color_name, argv[i + 1], sizeof(bg_color_name) - 1);
+                bg_color_name[sizeof(bg_color_name) - 1] = '\0';
+                strncpy(fg_color_name, argv[i + 2], sizeof(fg_color_name) - 1);
+                fg_color_name[sizeof(fg_color_name) - 1] = '\0';
+                letter_color_name[0] = '\0'; // No letter color
                 i += 2; // Skip the next two arguments
             } else if (colors_provided == 1) {
                 // User provided only background color
                 strncpy(bg_color_name, argv[i + 1], sizeof(bg_color_name) - 1);
                 bg_color_name[sizeof(bg_color_name) - 1] = '\0';
                 strcpy(fg_color_name, "default");
+                letter_color_name[0] = '\0'; // No letter color
                 i += 1; // Skip the next argument
+            } else {
+                // No colors provided, display help
+                print_usage(argv[0]);
             }
 
             // Validate colors
             if ((!color_name_to_code(bg_color_name, 1) && strcmp(bg_color_name, "default") != 0) ||
-                (!color_name_to_code(fg_color_name, 0) && strcmp(fg_color_name, "default") != 0)) {
+                (!color_name_to_code(fg_color_name, 0) && strcmp(fg_color_name, "default") != 0) ||
+                (letter_color_name[0] != '\0' && !color_name_to_code(letter_color_name, 0) && strcmp(letter_color_name, "default") != 0)) {
                 fprintf(stderr, "Invalid color name(s) provided.\n");
                 enable_cursor();
                 exit(EXIT_FAILURE);
@@ -207,6 +223,11 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
+    // Display "Termkey" at startup
+    strncpy(last_message, "Termkey", sizeof(last_message));
+    last_message[sizeof(last_message) - 1] = '\0'; // Ensure null termination
+    print_centered(last_message);
+
     // Enable the recording context asynchronously
     if (!XRecordEnableContextAsync(record_display, context, event_callback, NULL)) {
         fprintf(stderr, "Error enabling recording context.\n");
@@ -253,6 +274,10 @@ void cleanup_and_exit(int signum) {
     if (record_display != NULL) {
         XCloseDisplay(record_display);
     }
+
+    // Reset the terminal
+    system("reset");
+
     exit(EXIT_SUCCESS);
 }
 
@@ -263,13 +288,14 @@ void handle_resize(int signum) {
 
 // Function to print usage instructions
 void print_usage(const char *prog_name) {
-    printf("Usage: %s [-c bg_color fg_color]\n", prog_name);
+    printf("Usage: %s [-c bg_color [fg_color [letter_color]]]\n", prog_name);
     printf("Available colors: black, red, green, yellow, blue, magenta, cyan, white, default\n");
     printf("Examples:\n");
-    printf("  %s -c red blue       # Background red, foreground blue\n", prog_name);
-    printf("  %s -c red default    # Background red, foreground default\n", prog_name);
-    printf("  %s -c default green  # Background default, foreground green\n", prog_name);
-    printf("  %s -c                # Display this help message\n", prog_name);
+    printf("  %s -c red blue             # Background red, foreground blue\n", prog_name);
+    printf("  %s -c red default          # Background red, foreground default\n", prog_name);
+    printf("  %s -c default green        # Background default, foreground green\n", prog_name);
+    printf("  %s -c default default red  # Only letters colored red\n", prog_name);
+    printf("  %s -c                      # Display this help message\n", prog_name);
     exit(EXIT_SUCCESS);
 }
 
@@ -339,8 +365,9 @@ void print_centered(const char *message) {
 
     // Check if color function is activated
     if (use_color) {
-        const char *bg_color_code;
-        const char *fg_color_code;
+        const char *bg_color_code = NULL;
+        const char *fg_color_code = NULL;
+        const char *letter_color_code = NULL;
 
         if (color_toggle) {
             // Swap background and foreground colors to create blinking effect
@@ -351,24 +378,45 @@ void print_centered(const char *message) {
             fg_color_code = color_name_to_code(fg_color_name, 0);
         }
 
+        // Get letter color code if provided
+        if (letter_color_name[0] != '\0') {
+            letter_color_code = color_name_to_code(letter_color_name, 0);
+        }
+
         // Apply background color if valid
         if (bg_color_code) {
             printf("%s", bg_color_code);
         }
 
-        // Apply foreground color if valid
-        if (fg_color_code) {
-            printf("%s", fg_color_code);
+        // Now print each character
+        for (int i = 0; i < len; i++) {
+            char c = message[i];
+
+            if (isgraph((unsigned char)c) && letter_color_code) {
+                // Apply letter color to all printable characters except space
+                printf("%s", letter_color_code);
+            } else if (fg_color_code) {
+                // Apply foreground color
+                printf("%s", fg_color_code);
+            } else {
+                // Reset to default foreground color
+                printf("\033[39m");
+            }
+
+            // Print the character
+            printf("%c", c);
         }
 
         // Toggle color for next time
         color_toggle = !color_toggle;
+
+        // Reset attributes
+        printf("\033[0m\n");
+
+    } else {
+        // No color, simply print the message
+        printf("%s\n", message);
     }
-
-    printf("%s", message);  // Prints the text
-
-    // Reset attributes
-    printf("\033[0m\n");
 
     fflush(stdout);  // Ensures the text is displayed immediately
 }
