@@ -24,6 +24,10 @@ static int use_color = 0;                   // Flag to activate/deactivate color
 static char bg_color_name[20] = "";         // Background color name
 static char fg_color_name[20] = "";         // Foreground color name
 
+// Variables for terminal resizing
+static volatile sig_atomic_t terminal_resized = 0; // Flag to indicate terminal resize
+static char last_message[MAX_MESSAGE_LENGTH * 2 + 10] = ""; // Store the last displayed message
+
 // Enum to represent modifier keys
 typedef enum {
     SHIFT_L,
@@ -34,6 +38,7 @@ typedef enum {
     ALT_R,
     META_L,
     META_R,
+    ALTGR,
     MODIFIER_COUNT
 } ModifierKey;
 
@@ -49,14 +54,15 @@ typedef struct {
 // Array of special keys and their names
 static const KeyMap specialKeyMap[] = {
     // Modifier keys
-    {XK_Shift_L,   "SHIFT_L"},
-    {XK_Shift_R,   "SHIFT_R"},
-    {XK_Control_L, "CONTROL_L"},
-    {XK_Control_R, "CONTROL_R"},
-    {XK_Alt_L,     "ALT_L"},
-    {XK_Alt_R,     "ALT_R"},
-    {XK_Meta_L,    "META_L"},
-    {XK_Meta_R,    "META_R"},
+    {XK_Shift_L,          "SHIFT_L"},
+    {XK_Shift_R,          "SHIFT_R"},
+    {XK_Control_L,        "CONTROL_L"},
+    {XK_Control_R,        "CONTROL_R"},
+    {XK_Alt_L,            "ALT_L"},
+    {XK_Alt_R,            "ALT_R"},
+    {XK_Meta_L,           "META_L"},
+    {XK_Meta_R,           "META_R"},
+    {XK_ISO_Level3_Shift, "ALTGR"},
     // Other special keys
     {XK_apostrophe,     "APOSTROPHE (')"},
     {XK_slash,          "SLASH (/)"},
@@ -105,11 +111,13 @@ void build_modifiers_message(char *modifiers_message, size_t size, KeySym curren
 void event_callback(XPointer priv, XRecordInterceptData *data);
 void print_usage(const char *prog_name);
 void cleanup_and_exit(int signum);
+void handle_resize(int signum);
 
 int main(int argc, char *argv[]) {
-    // Register signal handlers for clean exit
+    // Register signal handlers for clean exit and terminal resize
     signal(SIGINT, cleanup_and_exit);
     signal(SIGTERM, cleanup_and_exit);
+    signal(SIGWINCH, handle_resize); // Handle terminal resize
 
     // Disable the cursor when starting the program
     disable_cursor();
@@ -213,6 +221,13 @@ int main(int argc, char *argv[]) {
     // Main event loop
     while (1) {
         XRecordProcessReplies(record_display);
+
+        // Check if terminal was resized
+        if (terminal_resized) {
+            terminal_resized = 0; // Reset the flag
+            print_centered(last_message); // Reprint the last message
+        }
+
         usleep(10000); // Small pause to avoid high CPU load
     }
 
@@ -239,6 +254,11 @@ void cleanup_and_exit(int signum) {
         XCloseDisplay(record_display);
     }
     exit(EXIT_SUCCESS);
+}
+
+// Function to handle terminal resize signals
+void handle_resize(int signum) {
+    terminal_resized = 1; // Set the flag to indicate terminal was resized
 }
 
 // Function to print usage instructions
@@ -315,7 +335,7 @@ void print_centered(const char *message) {
     printf("\033[H\033[J");  // Clears the screen
 
     // Move the cursor to the position
-    printf("\033[%d;%dH", y, x);
+    printf("\033[%d;%dH", y, x + 1); // +1 to adjust for 1-based indexing in terminals
 
     // Check if color function is activated
     if (use_color) {
@@ -380,14 +400,15 @@ const char* keysym_to_string(KeySym keysym) {
 // Function to update modifier key state
 void update_modifier_state(KeySym keysym, int is_pressed) {
     switch (keysym) {
-        case XK_Shift_L:   modifiers_state[SHIFT_L]   = is_pressed; break;
-        case XK_Shift_R:   modifiers_state[SHIFT_R]   = is_pressed; break;
-        case XK_Control_L: modifiers_state[CONTROL_L] = is_pressed; break;
-        case XK_Control_R: modifiers_state[CONTROL_R] = is_pressed; break;
-        case XK_Alt_L:     modifiers_state[ALT_L]     = is_pressed; break;
-        case XK_Alt_R:     modifiers_state[ALT_R]     = is_pressed; break;
-        case XK_Meta_L:    modifiers_state[META_L]    = is_pressed; break;
-        case XK_Meta_R:    modifiers_state[META_R]    = is_pressed; break;
+        case XK_Shift_L:          modifiers_state[SHIFT_L]   = is_pressed; break;
+        case XK_Shift_R:          modifiers_state[SHIFT_R]   = is_pressed; break;
+        case XK_Control_L:        modifiers_state[CONTROL_L] = is_pressed; break;
+        case XK_Control_R:        modifiers_state[CONTROL_R] = is_pressed; break;
+        case XK_Alt_L:            modifiers_state[ALT_L]     = is_pressed; break;
+        case XK_Alt_R:            modifiers_state[ALT_R]     = is_pressed; break;
+        case XK_Meta_L:           modifiers_state[META_L]    = is_pressed; break;
+        case XK_Meta_R:           modifiers_state[META_R]    = is_pressed; break;
+        case XK_ISO_Level3_Shift: modifiers_state[ALTGR]     = is_pressed; break;
         default: break;
     }
 }
@@ -400,14 +421,15 @@ void build_modifiers_message(char *modifiers_message, size_t size, KeySym curren
         if (modifiers_state[i]) {
             KeySym modifier_keysym;
             switch (i) {
-                case SHIFT_L:   modifier_keysym = XK_Shift_L;   break;
-                case SHIFT_R:   modifier_keysym = XK_Shift_R;   break;
-                case CONTROL_L: modifier_keysym = XK_Control_L; break;
-                case CONTROL_R: modifier_keysym = XK_Control_R; break;
-                case ALT_L:     modifier_keysym = XK_Alt_L;     break;
-                case ALT_R:     modifier_keysym = XK_Alt_R;     break;
-                case META_L:    modifier_keysym = XK_Meta_L;    break;
-                case META_R:    modifier_keysym = XK_Meta_R;    break;
+                case SHIFT_L:   modifier_keysym = XK_Shift_L;          break;
+                case SHIFT_R:   modifier_keysym = XK_Shift_R;          break;
+                case CONTROL_L: modifier_keysym = XK_Control_L;        break;
+                case CONTROL_R: modifier_keysym = XK_Control_R;        break;
+                case ALT_L:     modifier_keysym = XK_Alt_L;            break;
+                case ALT_R:     modifier_keysym = XK_Alt_R;            break;
+                case META_L:    modifier_keysym = XK_Meta_L;           break;
+                case META_R:    modifier_keysym = XK_Meta_R;           break;
+                case ALTGR:     modifier_keysym = XK_ISO_Level3_Shift; break;
                 default: continue;
             }
             if (modifier_keysym != current_keysym) {
@@ -439,6 +461,7 @@ void event_callback(XPointer priv, XRecordInterceptData *data) {
         mouse_button_pressed = event->u.u.detail; // The detail field contains the button number
         const char *button_name = mouse_button_to_name(mouse_button_pressed);
         snprintf(message, sizeof(message), "%s", button_name);
+        strncpy(last_message, message, sizeof(last_message)); // Store the message
         print_centered(message);
     } else if (event_type == ButtonRelease) {
         mouse_button_pressed = 0; // Mouse button released
@@ -470,7 +493,8 @@ void event_callback(XPointer priv, XRecordInterceptData *data) {
                 int is_modifier_key = (keysym == XK_Shift_L || keysym == XK_Shift_R ||
                                        keysym == XK_Control_L || keysym == XK_Control_R ||
                                        keysym == XK_Alt_L || keysym == XK_Alt_R ||
-                                       keysym == XK_Meta_L || keysym == XK_Meta_R);
+                                       keysym == XK_Meta_L || keysym == XK_Meta_R ||
+                                       keysym == XK_ISO_Level3_Shift);
 
                 char modifiers_message[MAX_MESSAGE_LENGTH];
                 build_modifiers_message(modifiers_message, sizeof(modifiers_message), keysym);
@@ -499,6 +523,7 @@ void event_callback(XPointer priv, XRecordInterceptData *data) {
                     message[sizeof(message) - 1] = '\0'; // Ensure null termination
                 }
 
+                strncpy(last_message, message, sizeof(last_message)); // Store the message
                 print_centered(message);
             }
         }
