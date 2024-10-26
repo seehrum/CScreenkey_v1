@@ -39,11 +39,12 @@ This will create an executable file called `termkey`.
 Run the program from the terminal:
 
 ```bash
-./termkey [-c bg_color fg_color]
+./termkey [-c bg_color fg_color text_color]
 ```
 
 - `bg_color`: Background color
 - `fg_color`: Foreground color
+- `text_color`: Text color
 
 ### Example Commands:
 
@@ -60,6 +61,11 @@ Run the program from the terminal:
 3. **Set Background to Default and Foreground to Green**:
    ```bash
    ./termkey -c default green
+   ```
+   
+4. **Set Background and Foreground to Default and Text to Green**:
+   ```bash
+   ./termkey -c default default green
    ```
 
 ### Supported Colors
