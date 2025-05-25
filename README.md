@@ -20,7 +20,7 @@ To build and run TermKey, you will need the following dependencies installed on 
 On Debian-based systems (like Ubuntu), you can install them with:
 
 ```bash
-sudo apt-get install libx11-dev libxkbfile-dev
+sudo apt-get install libx11-dev libxkbfile-dev libxtst-dev x11proto-dev libxext-dev
 ```
 
 ## Building TermKey
