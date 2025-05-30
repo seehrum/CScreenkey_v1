@@ -411,13 +411,13 @@ const char *keysym_to_string(KeySym keysym) {
 
 // Function to print usage instructions
 void print_usage(const char *prog_name) {
-    printf("Usage: %s [-c bg_color [fg_color [letter_color]]]\n", prog_name);
+    printf("Usage: %s -c bg_color fg_color \n", prog_name);
     printf("Available colors: black, red, green, yellow, blue, magenta, cyan, white, default\n");
     printf("Examples:\n");
-    printf("  %s -c --text=green          # Just green text\n", prog_name);
-    printf("  %s -c --bg=red --text=cyan  # Red background, cyan text\n", prog_name);
-    printf("  %s -c --bg=black --fg=white # Black background, white foreground\n", prog_name);
-    printf("  %s -c                       # Display this help message\n", prog_name);
+    printf("  %s -c --text=green            # Just green text\n", prog_name);
+    printf("  %s -c --bg=red --text=cyan    # Red background, cyan text\n", prog_name);
+    printf("  %s -c --bg=black --text=white # Black background, white foreground\n", prog_name);
+    printf("  %s -c                         # Display this help message\n", prog_name);
     exit(EXIT_SUCCESS);
 }
 
