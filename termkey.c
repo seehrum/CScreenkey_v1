@@ -112,9 +112,33 @@ void print_usage(const char *prog_name);
 void event_callback(XPointer priv, XRecordInterceptData *data);
 void update_modifier_state(KeySym keysym, int is_key_press);
 void cleanup(void);
+void signal_handler(int sig);
+
+void signal_handler(int sig) {
+    // Make signal handler async-safe by avoiding complex operations
+    static const char reset_seq[] = "\033c\033[0m\033[?25h\033[2J\033[H";
+    
+    // Write reset sequence directly (async-safe)
+    if (write(STDOUT_FILENO, reset_seq, sizeof(reset_seq) - 1) == -1) {
+        // If write fails, try basic reset
+        if (write(STDOUT_FILENO, "\033[0m\033[?25h", 10) == -1) {
+            // Ignore write errors in signal handler
+        }
+    }
+    
+    // Don't call complex X11 functions in signal handler
+    // Just exit - the OS will clean up file descriptors
+    _exit(0);
+}
 
 // Main function
 int main(int argc, char *argv[]) {
+    // Register signal handlers FIRST, before any other initialization
+    signal(SIGINT, signal_handler);   // Ctrl+C
+    signal(SIGTERM, signal_handler);  // Termination request
+    signal(SIGQUIT, signal_handler);  // Quit signal (Ctrl+\)
+    signal(SIGHUP, signal_handler);   // Hangup signal
+
     // Parse command-line arguments
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-c") == 0) {
