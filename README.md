@@ -44,6 +44,7 @@ Run the program from the terminal:
 
 - `bg_color`: Background color
 - `fg_color`: Foreground color
+- `text_color`: Text color
 
 ### Example Commands:
 
