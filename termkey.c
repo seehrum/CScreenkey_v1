@@ -139,47 +139,50 @@ int main(int argc, char *argv[]) {
     signal(SIGQUIT, signal_handler);  // Quit signal (Ctrl+\)
     signal(SIGHUP, signal_handler);   // Hangup signal
 
-    // Parse command-line arguments
+    // Parse command-line arguments with improved logic
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-c") == 0) {
+        if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--color") == 0) {
             use_color = 1;
-            int colors_provided = argc - i - 1; // Number of arguments after -c
-
-            if (colors_provided == 0) {
-                // No colors provided, display help
+            i++; // Move to next argument
+            
+            // No more arguments after -c, show help
+            if (i >= argc) {
                 print_usage(argv[0]);
-            } else if (colors_provided >= 3) {
-                // User provided background, foreground, and letter colors
-                strncpy(bg_color_name, argv[i + 1], COLOR_NAME_LENGTH - 1);
-                strncpy(fg_color_name, argv[i + 2], COLOR_NAME_LENGTH - 1);
-                strncpy(letter_color_name, argv[i + 3], COLOR_NAME_LENGTH - 1);
-                i += 3; // Skip the next three arguments
-            } else if (colors_provided == 2) {
-                // User provided background and foreground colors
-                strncpy(bg_color_name, argv[i + 1], COLOR_NAME_LENGTH - 1);
-                strncpy(fg_color_name, argv[i + 2], COLOR_NAME_LENGTH - 1);
-                letter_color_name[0] = '\0'; // No letter color
-                i += 2; // Skip the next two arguments
-            } else if (colors_provided == 1) {
-                // User provided only background color
-                strncpy(bg_color_name, argv[i + 1], COLOR_NAME_LENGTH - 1);
-                strcpy(fg_color_name, "default");
-                letter_color_name[0] = '\0'; // No letter color
-                i += 1; // Skip the next argument
-            } else {
-                // No colors provided, display help
-                print_usage(argv[0]);
+                exit(EXIT_SUCCESS);
             }
-
+            
+            // Parse color arguments with named options
+            while (i < argc) {
+                if (strncmp(argv[i], "--bg=", 5) == 0) {
+                    strncpy(bg_color_name, argv[i] + 5, COLOR_NAME_LENGTH - 1);
+                    bg_color_name[COLOR_NAME_LENGTH - 1] = '\0';
+                } else if (strncmp(argv[i], "--fg=", 5) == 0) {
+                    strncpy(fg_color_name, argv[i] + 5, COLOR_NAME_LENGTH - 1);
+                    fg_color_name[COLOR_NAME_LENGTH - 1] = '\0';
+                } else if (strncmp(argv[i], "--text=", 7) == 0) {
+                    strncpy(letter_color_name, argv[i] + 7, COLOR_NAME_LENGTH - 1);
+                    letter_color_name[COLOR_NAME_LENGTH - 1] = '\0';
+                } else {
+                    // Unknown option, break out of color parsing
+                    i--;
+                    break;
+                }
+                i++;
+            }
+            
             // Validate colors
-            if ((color_name_to_code(bg_color_name, 1) == NULL && strcmp(bg_color_name, "default") != 0) ||
-                (color_name_to_code(fg_color_name, 0) == NULL && strcmp(fg_color_name, "default") != 0) ||
-                (letter_color_name[0] != '\0' &&
-                 color_name_to_code(letter_color_name, 0) == NULL &&
-                 strcmp(letter_color_name, "default") != 0)) {
+            if ((strlen(bg_color_name) > 0 && strcmp(bg_color_name, "default") != 0 && 
+                 color_name_to_code(bg_color_name, 1) == NULL) ||
+                (strlen(fg_color_name) > 0 && strcmp(fg_color_name, "default") != 0 && 
+                 color_name_to_code(fg_color_name, 0) == NULL) ||
+                (strlen(letter_color_name) > 0 && strcmp(letter_color_name, "default") != 0 && 
+                 color_name_to_code(letter_color_name, 0) == NULL)) {
                 fprintf(stderr, "Invalid color name(s) provided.\n");
                 exit(EXIT_FAILURE);
             }
+            
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_usage(argv[0]);
         } else {
             // Unknown option
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
