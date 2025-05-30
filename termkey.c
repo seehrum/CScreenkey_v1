@@ -411,7 +411,7 @@ const char *keysym_to_string(KeySym keysym) {
 
 // Function to print usage instructions
 void print_usage(const char *prog_name) {
-    printf("Usage: %s -c bg_color fg_color \n", prog_name);
+    printf("Usage: %s -c bg_color fg_color text_color\n", prog_name);
     printf("Available colors: black, red, green, yellow, blue, magenta, cyan, white, default\n");
     printf("Examples:\n");
     printf("  %s -c --text=green            # Just green text\n", prog_name);
