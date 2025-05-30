@@ -414,11 +414,10 @@ void print_usage(const char *prog_name) {
     printf("Usage: %s [-c bg_color [fg_color [letter_color]]]\n", prog_name);
     printf("Available colors: black, red, green, yellow, blue, magenta, cyan, white, default\n");
     printf("Examples:\n");
-    printf("  %s -c red blue             # Background red, foreground blue\n", prog_name);
-    printf("  %s -c red default          # Background red, foreground default\n", prog_name);
-    printf("  %s -c default green        # Background default, foreground green\n", prog_name);
-    printf("  %s -c default default red  # Only letters colored red\n", prog_name);
-    printf("  %s -c                      # Display this help message\n", prog_name);
+    printf("  %s -c --text=green          # Just green text\n", prog_name);
+    printf("  %s -c --bg=red --text=cyan  # Red background, cyan text\n", prog_name);
+    printf("  %s -c --bg=black --fg=white # Black background, white foreground\n", prog_name);
+    printf("  %s -c                       # Display this help message\n", prog_name);
     exit(EXIT_SUCCESS);
 }
 
