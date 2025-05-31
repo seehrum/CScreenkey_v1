@@ -97,6 +97,23 @@ TermKey gracefully handles termination signals like `SIGINT` (Ctrl+C) or `SIGTER
 - Close X11 connections properly.
 - Exit the program without leaving the terminal in an inconsistent state.
 
+# Termkey-win - Windows Version
+A Windows-compatible version was developed for use via the Command Prompt (CMD). The application was successfully tested on Windows 7 32-bit.
+
+Compilation Instructions:
+The code was compiled using the Tiny C Compiler (TCC).
+
+Use the following command to compile:
+```cmd
+tcc -o termkey-win.exe termkey-win.c -luser32 -lkernel32
+```
+
+Execution:
+Run the executable from the Command Prompt:
+```cmd
+termkey-win.exe
+```
+
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
