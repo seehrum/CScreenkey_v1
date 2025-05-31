@@ -114,6 +114,8 @@ Run the executable from the Command Prompt:
 termkey-win.exe
 ```
 
+Note: The Windows version is not stable. It worked reasonably well on Windows 7, although some keys were not recognized correctly, and there are bugs on Windows 10.
+
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
