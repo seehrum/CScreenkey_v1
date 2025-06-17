@@ -1,5 +1,6 @@
 // termkey.c - Professional keyboard and mouse event monitor
 // Displays keyboard and mouse events centered on screen with color support
+// Enhanced with key repeat counter feature
 // Author: Programming Expert | Optimized Professional Version
 
 #include <stdio.h>
@@ -24,6 +25,10 @@ typedef struct {
     int use_color, mouse_pressed, color_toggle;
     char bg_color[COLOR_LEN], fg_color[COLOR_LEN], text_color[COLOR_LEN];
     struct { int shift_l, shift_r, ctrl_l, ctrl_r, alt_l, alt_r, meta_l, meta_r, altgr, super_l, super_r; } mods;
+    // Key repeat counter state
+    KeySym last_key;
+    int key_count;
+    char last_message[MAX_MSG_LEN * 2];
 } AppState;
 
 static AppState app = {0};
@@ -178,6 +183,9 @@ static void event_callback(XPointer priv, XRecordInterceptData *data) {
     if (event_type == ButtonPress) {
         app.mouse_pressed = event->u.u.detail;
         print_centered(mouse_button_name(app.mouse_pressed));
+        // Reset key counter on mouse event
+        app.last_key = 0;
+        app.key_count = 0;
     } else if (event_type == ButtonRelease) {
         app.mouse_pressed = 0;
     } else if (event_type == KeyPress) {
@@ -227,7 +235,19 @@ static void event_callback(XPointer priv, XRecordInterceptData *data) {
             message[sizeof(message) - 1] = '\0';
         }
         
-        print_centered(message);
+        // Key repeat counter logic
+        if (sym == app.last_key && strcmp(message, app.last_message) == 0 && !is_modifier) {
+            app.key_count++;
+            char counted_msg[MAX_MSG_LEN * 2 + 32]; // Extra space for counter
+            snprintf(counted_msg, sizeof(counted_msg), "%s [x%d]", message, app.key_count);
+            print_centered(counted_msg);
+        } else {
+            app.last_key = sym;
+            app.key_count = 1;
+            strncpy(app.last_message, message, sizeof(app.last_message) - 1);
+            app.last_message[sizeof(app.last_message) - 1] = '\0';
+            print_centered(message);
+        }
     } else if (event_type == KeyRelease) {
         KeySym sym = XkbKeycodeToKeysym(app.display, event->u.u.detail, 0, 0);
         update_modifiers(sym, 0);
