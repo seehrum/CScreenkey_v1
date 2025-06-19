@@ -1,6 +1,5 @@
 // termkey.c - Professional keyboard and mouse event monitor
-// Displays keyboard and mouse events centered on screen with color support
-// Enhanced with key repeat counter feature
+// Fixed segmentation fault and improved stability
 // Author: Programming Expert | Optimized Professional Version
 
 #include <stdio.h>
@@ -8,8 +7,10 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 #include <ctype.h>
 #include <signal.h>
+#include <errno.h>
 #include <X11/Xlib.h>
 #include <X11/Xproto.h>
 #include <X11/XKBlib.h>
@@ -18,20 +19,27 @@
 
 #define MAX_MSG_LEN 256
 #define COLOR_LEN 20
+#define REPEAT_THRESHOLD_MS 100
 
 // Global state structure
 typedef struct {
     Display *display, *record_display;
-    int use_color, mouse_pressed, color_toggle;
-    char bg_color[COLOR_LEN], fg_color[COLOR_LEN], text_color[COLOR_LEN];
-    struct { int shift_l, shift_r, ctrl_l, ctrl_r, alt_l, alt_r, meta_l, meta_r, altgr, super_l, super_r; } mods;
-    // Key repeat counter state
+    int use_color, mouse_pressed, running;
+    char bg_color[COLOR_LEN], fg_color[COLOR_LEN];
+    struct { 
+        int shift_l, shift_r, ctrl_l, ctrl_r, alt_l, alt_r, 
+            meta_l, meta_r, altgr, super_l, super_r; 
+    } mods;
     KeySym last_key;
     int key_count;
+    struct timeval last_key_time;
     char last_message[MAX_MSG_LEN * 2];
+    XRecordContext context;
+    XRecordRange *range;
 } AppState;
 
 static AppState app = {0};
+static volatile sig_atomic_t exit_requested = 0;
 
 // Color mapping table
 static const struct { const char *name, *fg, *bg; } colors[] = {
@@ -44,86 +52,139 @@ static const struct { const char *name, *fg, *bg; } colors[] = {
 
 // Special key mapping
 static const struct { KeySym sym; const char *name; } special_keys[] = {
-    {XK_Shift_L, "SHIFT_L"}, {XK_Shift_R, "SHIFT_R"}, {XK_Control_L, "CONTROL_L"}, {XK_Control_R, "CONTROL_R"},
-    {XK_Alt_L, "ALT_L"}, {XK_Alt_R, "ALT_R"}, {XK_Meta_L, "META_L"}, {XK_Meta_R, "META_R"},
+    {XK_Shift_L, "SHIFT_L"}, {XK_Shift_R, "SHIFT_R"}, 
+    {XK_Control_L, "CONTROL_L"}, {XK_Control_R, "CONTROL_R"},
+    {XK_Alt_L, "ALT_L"}, {XK_Alt_R, "ALT_R"}, 
+    {XK_Meta_L, "META_L"}, {XK_Meta_R, "META_R"},
     {XK_ISO_Level3_Shift, "ALTGR"}, {XK_Super_L, "SUPER_L"}, {XK_Super_R, "SUPER_R"},
-    {XK_apostrophe, "APOSTROPHE (')"}, {XK_slash, "SLASH (/)"}, {XK_backslash, "BACKSLASH (\\)"},
-    {XK_Left, "ARROW LEFT"}, {XK_Right, "ARROW RIGHT"}, {XK_Up, "ARROW UP"}, {XK_Down, "ARROW DOWN"},
-    {XK_KP_Divide, "KP_DIVIDE (/)"}, {XK_KP_Multiply, "KP_MULTIPLY (*)"}, {XK_KP_Subtract, "KP_SUBTRACT (-)"},
-    {XK_KP_Add, "KP_ADD (+)"}, {XK_bracketleft, "BRACKETLEFT ([)"}, {XK_bracketright, "BRACKETRIGHT (])"},
-    {XK_comma, "COMMA (,)"}, {XK_period, "PERIOD (.)"}, {XK_dead_acute, "DEAD_ACUTE (´)"},
-    {XK_dead_tilde, "DEAD_TILDE (~)"}, {XK_dead_cedilla, "DEAD_CEDILLA (Ç)"}, {XK_minus, "MINUS (-)"},
-    {XK_equal, "EQUAL (=)"}, {XK_semicolon, "SEMICOLON (;)"}, {XK_Page_Up, "PAGE UP"},
-    {XK_Page_Down, "PAGE DOWN"}, {XK_Home, "HOME"}, {XK_End, "END"}, {0, NULL}
+    {XK_apostrophe, "APOSTROPHE (')"}, {XK_slash, "SLASH (/)"}, 
+    {XK_backslash, "BACKSLASH (\\)"}, {XK_Left, "ARROW LEFT"}, 
+    {XK_Right, "ARROW RIGHT"}, {XK_Up, "ARROW UP"}, {XK_Down, "ARROW DOWN"},
+    {XK_KP_Divide, "KP_DIVIDE (/)"}, {XK_KP_Multiply, "KP_MULTIPLY (*)"}, 
+    {XK_KP_Subtract, "KP_SUBTRACT (-)"}, {XK_KP_Add, "KP_ADD (+)"}, 
+    {XK_bracketleft, "BRACKETLEFT ([)"}, {XK_bracketright, "BRACKETRIGHT (])"},
+    {XK_comma, "COMMA (,)"}, {XK_period, "PERIOD (.)"}, 
+    {XK_dead_acute, "DEAD_ACUTE (´)"}, {XK_dead_tilde, "DEAD_TILDE (~)"}, 
+    {XK_dead_cedilla, "DEAD_CEDILLA (Ç)"}, {XK_minus, "MINUS (-)"}, 
+    {XK_equal, "EQUAL (=)"}, {XK_semicolon, "SEMICOLON (;)"}, 
+    {XK_Page_Up, "PAGE UP"}, {XK_Page_Down, "PAGE DOWN"}, 
+    {XK_Home, "HOME"}, {XK_End, "END"}, {0, NULL}
 };
 
 // Function prototypes
 static void cleanup_and_exit(int sig);
+static void cleanup_resources(void);
 static const char* get_color_code(const char *name, int is_bg);
 static void get_terminal_size(int *rows, int *cols);
 static void print_centered(const char *msg);
 static const char* mouse_button_name(int btn);
 static const char* keysym_to_name(KeySym sym);
 static void update_modifiers(KeySym sym, int pressed);
+static long get_time_diff_ms(struct timeval *start, struct timeval *end);
 static void event_callback(XPointer priv, XRecordInterceptData *data);
 static void print_usage(const char *prog);
 static int parse_args(int argc, char *argv[]);
+static int validate_color(const char *color);
 
-// Signal handler for clean exit
+// Signal handler for clean exit - FIXED
 static void cleanup_and_exit(int sig) {
+    exit_requested = 1;
+    app.running = 0;
+    
+    // Use async-signal-safe functions only
     const char reset[] = "\033c\033[0m\033[?25h\033[2J\033[H";
-    if (write(STDOUT_FILENO, reset, sizeof(reset) - 1) == -1) {
-        write(STDOUT_FILENO, "\033[0m\033[?25h", 10);
-    }
+    write(STDOUT_FILENO, reset, sizeof(reset) - 1);
+    
+    // Don't call cleanup_resources here - do it in main
     _exit(0);
 }
 
-// Get ANSI color code for given color name
+// Cleanup resources properly - IMPROVED
+static void cleanup_resources(void) {
+    if (app.context && app.record_display) {
+        XRecordDisableContext(app.record_display, app.context);
+        XSync(app.record_display, False);
+        XRecordFreeContext(app.record_display, app.context);
+        app.context = 0;
+    }
+    
+    if (app.range) {
+        XFree(app.range);
+        app.range = NULL;
+    }
+    
+    if (app.record_display) {
+        XCloseDisplay(app.record_display);
+        app.record_display = NULL;
+    }
+    
+    if (app.display) {
+        XCloseDisplay(app.display);
+        app.display = NULL;
+    }
+}
+
+// Validate color name
+static int validate_color(const char *color) {
+    if (!color || strlen(color) == 0 || strcmp(color, "default") == 0) return 1;
+    
+    for (int i = 0; colors[i].name; i++) {
+        if (strcmp(color, colors[i].name) == 0) return 1;
+    }
+    return 0;
+}
+
+// Get ANSI color code
 static const char* get_color_code(const char *name, int is_bg) {
-    if (!name || strcmp(name, "") == 0) return NULL;
+    if (!name || strcmp(name, "") == 0 || strcmp(name, "default") == 0) {
+        return is_bg ? colors[8].bg : colors[8].fg;
+    }
+    
     for (int i = 0; colors[i].name; i++) {
         if (strcmp(name, colors[i].name) == 0) {
             return is_bg ? colors[i].bg : colors[i].fg;
         }
     }
-    return NULL;
+    return is_bg ? colors[8].bg : colors[8].fg;
 }
 
-// Get current terminal dimensions
+// Get terminal dimensions
 static void get_terminal_size(int *rows, int *cols) {
     struct winsize ws;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != -1) {
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != -1 && ws.ws_row > 0 && ws.ws_col > 0) {
         *rows = ws.ws_row;
         *cols = ws.ws_col;
     } else {
-        *rows = 24; *cols = 80; // Fallback defaults
+        *rows = 24; *cols = 80;
     }
 }
 
-// Print message centered on screen with optional colors
+// Calculate time difference in milliseconds
+static long get_time_diff_ms(struct timeval *start, struct timeval *end) {
+    long sec_diff = end->tv_sec - start->tv_sec;
+    long usec_diff = end->tv_usec - start->tv_usec;
+    
+    if (sec_diff > 1000) return 1000000;
+    return sec_diff * 1000 + usec_diff / 1000;
+}
+
+// Print centered message
 static void print_centered(const char *msg) {
+    if (!msg || exit_requested) return;
+    
     int rows, cols, len = strlen(msg);
     get_terminal_size(&rows, &cols);
     
-    printf("\033[H\033[J\033[%d;%dH", rows / 2, (cols - len) / 2 + 1);
+    int row_pos = rows > 0 ? rows / 2 : 1;
+    int col_pos = (cols > len) ? (cols - len) / 2 + 1 : 1;
+    
+    printf("\033[H\033[J\033[%d;%dH", row_pos, col_pos);
     
     if (app.use_color) {
-        const char *bg = app.color_toggle ? get_color_code(app.fg_color, 1) : get_color_code(app.bg_color, 1);
-        const char *fg = app.color_toggle ? get_color_code(app.bg_color, 0) : get_color_code(app.fg_color, 0);
-        const char *txt = get_color_code(app.text_color, 0);
-        
-        if (bg) printf("%s", bg);
-        
-        for (int i = 0; i < len; i++) {
-            if (isgraph((unsigned char)msg[i]) && txt) {
-                printf("%s%c", txt, msg[i]);
-            } else {
-                printf("%s%c", fg ? fg : "\033[39m", msg[i]);
-            }
-        }
-        
-        app.color_toggle = !app.color_toggle;
-        printf("\033[0m");
+        printf("%s%s%s\033[0m", 
+               get_color_code(app.bg_color, 1),
+               get_color_code(app.fg_color, 0),
+               msg);
     } else {
         printf("%s", msg);
     }
@@ -132,7 +193,7 @@ static void print_centered(const char *msg) {
     fflush(stdout);
 }
 
-// Convert mouse button number to descriptive name
+// Mouse button names
 static const char* mouse_button_name(int btn) {
     switch (btn) {
         case Button1: return "LEFT CLICK";
@@ -144,15 +205,17 @@ static const char* mouse_button_name(int btn) {
     }
 }
 
-// Convert KeySym to human-readable name
+// Convert KeySym to name
 static const char* keysym_to_name(KeySym sym) {
     for (int i = 0; special_keys[i].name; i++) {
         if (special_keys[i].sym == sym) return special_keys[i].name;
     }
-    return XKeysymToString(sym);
+    
+    const char *name = XKeysymToString(sym);
+    return name ? name : "UNKNOWN";
 }
 
-// Update modifier key states
+// Update modifier states
 static void update_modifiers(KeySym sym, int pressed) {
     switch (sym) {
         case XK_Shift_L: app.mods.shift_l = pressed; break;
@@ -169,10 +232,10 @@ static void update_modifiers(KeySym sym, int pressed) {
     }
 }
 
-// X11 event callback - processes keyboard and mouse events
+// X11 event callback - IMPROVED with better error handling
 static void event_callback(XPointer priv, XRecordInterceptData *data) {
-    if (data->category != XRecordFromServer || !data->data) {
-        XRecordFreeData(data);
+    if (!data || data->category != XRecordFromServer || !data->data || exit_requested) {
+        if (data) XRecordFreeData(data);
         return;
     }
     
@@ -183,7 +246,6 @@ static void event_callback(XPointer priv, XRecordInterceptData *data) {
     if (event_type == ButtonPress) {
         app.mouse_pressed = event->u.u.detail;
         print_centered(mouse_button_name(app.mouse_pressed));
-        // Reset key counter on mouse event
         app.last_key = 0;
         app.key_count = 0;
     } else if (event_type == ButtonRelease) {
@@ -193,7 +255,7 @@ static void event_callback(XPointer priv, XRecordInterceptData *data) {
         update_modifiers(sym, 1);
         
         const char *key_name = keysym_to_name(sym);
-        if (!key_name) {
+        if (!key_name || strlen(key_name) == 0) {
             XRecordFreeData(data);
             return;
         }
@@ -201,53 +263,91 @@ static void event_callback(XPointer priv, XRecordInterceptData *data) {
         char upper_key[MAX_MSG_LEN], mod_msg[MAX_MSG_LEN] = "";
         strncpy(upper_key, key_name, sizeof(upper_key) - 1);
         upper_key[sizeof(upper_key) - 1] = '\0';
-        for (int i = 0; upper_key[i]; i++) upper_key[i] = toupper((unsigned char)upper_key[i]);
+        
+        // Convert to uppercase
+        for (int i = 0; upper_key[i] && i < sizeof(upper_key) - 1; i++) {
+            upper_key[i] = toupper((unsigned char)upper_key[i]);
+        }
         
         int is_modifier = (sym == XK_Shift_L || sym == XK_Shift_R || sym == XK_Control_L || 
                           sym == XK_Control_R || sym == XK_Alt_L || sym == XK_Alt_R ||
                           sym == XK_Meta_L || sym == XK_Meta_R || sym == XK_ISO_Level3_Shift ||
                           sym == XK_Super_L || sym == XK_Super_R);
         
-        // Build modifier combination string
-        if (app.mods.ctrl_l && sym != XK_Control_L) strncat(mod_msg, "CONTROL_L + ", sizeof(mod_msg) - strlen(mod_msg) - 1);
-        if (app.mods.ctrl_r && sym != XK_Control_R) strncat(mod_msg, "CONTROL_R + ", sizeof(mod_msg) - strlen(mod_msg) - 1);
-        if (app.mods.alt_l && sym != XK_Alt_L) strncat(mod_msg, "ALT_L + ", sizeof(mod_msg) - strlen(mod_msg) - 1);
-        if (app.mods.alt_r && sym != XK_Alt_R) strncat(mod_msg, "ALT_R + ", sizeof(mod_msg) - strlen(mod_msg) - 1);
-        if (app.mods.shift_l && sym != XK_Shift_L) strncat(mod_msg, "SHIFT_L + ", sizeof(mod_msg) - strlen(mod_msg) - 1);
-        if (app.mods.shift_r && sym != XK_Shift_R) strncat(mod_msg, "SHIFT_R + ", sizeof(mod_msg) - strlen(mod_msg) - 1);
-        if (app.mods.meta_l && sym != XK_Meta_L) strncat(mod_msg, "META_L + ", sizeof(mod_msg) - strlen(mod_msg) - 1);
-        if (app.mods.meta_r && sym != XK_Meta_R) strncat(mod_msg, "META_R + ", sizeof(mod_msg) - strlen(mod_msg) - 1);
-        if (app.mods.altgr && sym != XK_ISO_Level3_Shift) strncat(mod_msg, "ALTGR + ", sizeof(mod_msg) - strlen(mod_msg) - 1);
-        if (app.mods.super_l && sym != XK_Super_L) strncat(mod_msg, "SUPER_L + ", sizeof(mod_msg) - strlen(mod_msg) - 1);
-        if (app.mods.super_r && sym != XK_Super_R) strncat(mod_msg, "SUPER_R + ", sizeof(mod_msg) - strlen(mod_msg) - 1);
+        // Build modifier string
+        size_t remaining = sizeof(mod_msg) - 1;
+        char *pos = mod_msg;
         
-        if (!(is_modifier && mod_msg[0] == '\0')) {
-            strncat(mod_msg, upper_key, sizeof(mod_msg) - strlen(mod_msg) - 1);
-        } else {
-            strncpy(mod_msg, upper_key, sizeof(mod_msg) - 1);
-            mod_msg[sizeof(mod_msg) - 1] = '\0';
+        if (app.mods.ctrl_l && sym != XK_Control_L && remaining > 12) {
+            strcpy(pos, "CONTROL_L + "); pos += 12; remaining -= 12;
+        }
+        if (app.mods.ctrl_r && sym != XK_Control_R && remaining > 12) {
+            strcpy(pos, "CONTROL_R + "); pos += 12; remaining -= 12;
+        }
+        if (app.mods.alt_l && sym != XK_Alt_L && remaining > 8) {
+            strcpy(pos, "ALT_L + "); pos += 8; remaining -= 8;
+        }
+        if (app.mods.alt_r && sym != XK_Alt_R && remaining > 8) {
+            strcpy(pos, "ALT_R + "); pos += 8; remaining -= 8;
+        }
+        if (app.mods.shift_l && sym != XK_Shift_L && remaining > 10) {
+            strcpy(pos, "SHIFT_L + "); pos += 10; remaining -= 10;
+        }
+        if (app.mods.shift_r && sym != XK_Shift_R && remaining > 10) {
+            strcpy(pos, "SHIFT_R + "); pos += 10; remaining -= 10;
+        }
+        if (app.mods.meta_l && sym != XK_Meta_L && remaining > 9) {
+            strcpy(pos, "META_L + "); pos += 9; remaining -= 9;
+        }
+        if (app.mods.meta_r && sym != XK_Meta_R && remaining > 9) {
+            strcpy(pos, "META_R + "); pos += 9; remaining -= 9;
+        }
+        if (app.mods.altgr && sym != XK_ISO_Level3_Shift && remaining > 8) {
+            strcpy(pos, "ALTGR + "); pos += 8; remaining -= 8;
+        }
+        if (app.mods.super_l && sym != XK_Super_L && remaining > 10) {
+            strcpy(pos, "SUPER_L + "); pos += 10; remaining -= 10;
+        }
+        if (app.mods.super_r && sym != XK_Super_R && remaining > 10) {
+            strcpy(pos, "SUPER_R + "); pos += 10; remaining -= 10;
         }
         
+        // Add main key
+        if (remaining > strlen(upper_key)) {
+            strcpy(pos, upper_key);
+        }
+        
+        // Format final message
         if (app.mouse_pressed) {
-            snprintf(message, sizeof(message), "%s + %s", mouse_button_name(app.mouse_pressed), mod_msg);
+            snprintf(message, sizeof(message), "%s + %s", 
+                    mouse_button_name(app.mouse_pressed), mod_msg);
         } else {
             strncpy(message, mod_msg, sizeof(message) - 1);
             message[sizeof(message) - 1] = '\0';
         }
         
-        // Key repeat counter logic
-        if (sym == app.last_key && strcmp(message, app.last_message) == 0 && !is_modifier) {
+        // Key repeat logic
+        struct timeval current_time;
+        gettimeofday(&current_time, NULL);
+        long time_diff = get_time_diff_ms(&app.last_key_time, &current_time);
+        
+        if (sym == app.last_key && strcmp(message, app.last_message) == 0 && 
+            !is_modifier && time_diff > REPEAT_THRESHOLD_MS) {
             app.key_count++;
-            char counted_msg[MAX_MSG_LEN * 2 + 32]; // Extra space for counter
+            char counted_msg[MAX_MSG_LEN * 2 + 32];
             snprintf(counted_msg, sizeof(counted_msg), "%s [x%d]", message, app.key_count);
             print_centered(counted_msg);
-        } else {
+            app.last_key_time = current_time;
+        } else if (time_diff > REPEAT_THRESHOLD_MS || sym != app.last_key || 
+                   strcmp(message, app.last_message) != 0) {
             app.last_key = sym;
             app.key_count = 1;
+            app.last_key_time = current_time;
             strncpy(app.last_message, message, sizeof(app.last_message) - 1);
             app.last_message[sizeof(app.last_message) - 1] = '\0';
             print_centered(message);
         }
+        
     } else if (event_type == KeyRelease) {
         KeySym sym = XkbKeycodeToKeysym(app.display, event->u.u.detail, 0, 0);
         update_modifiers(sym, 0);
@@ -256,126 +356,134 @@ static void event_callback(XPointer priv, XRecordInterceptData *data) {
     XRecordFreeData(data);
 }
 
-// Display usage information
+// Usage information
 static void print_usage(const char *prog) {
     printf("Usage: %s [OPTIONS]\n", prog);
     printf("Monitor and display keyboard/mouse events in terminal center\n\n");
     printf("Options:\n");
-    printf("  -c, --color           Enable color mode with following options:\n");
+    printf("  -c, --color           Enable color mode\n");
     printf("      --bg=COLOR        Set background color\n");
     printf("      --fg=COLOR        Set foreground color\n");
-    printf("      --text=COLOR      Set text color for printable characters\n");
-    printf("  -h, --help            Show this help message\n\n");
-    printf("Available colors: black, red, green, yellow, blue, magenta, cyan, white, default\n\n");
+    printf("  -h, --help            Show help\n\n");
+    printf("Colors: black, red, green, yellow, blue, magenta, cyan, white, default\n\n");
     printf("Examples:\n");
-    printf("  %s -c --text=green                    # Green text only\n", prog);
-    printf("  %s -c --bg=black --text=cyan          # Black background, cyan text\n", prog);
-    printf("  %s -c --bg=red --fg=white --text=blue # Full color customization\n", prog);
+    printf("  %s -c --fg=green\n", prog);
+    printf("  %s -c --bg=black --fg=cyan\n", prog);
     exit(EXIT_SUCCESS);
 }
 
-// Parse command line arguments
+// Parse arguments
 static int parse_args(int argc, char *argv[]) {
-    strcpy(app.bg_color, "default");
-    strcpy(app.fg_color, "default");
-    strcpy(app.text_color, "");
+    strncpy(app.bg_color, "default", COLOR_LEN - 1);
+    strncpy(app.fg_color, "default", COLOR_LEN - 1);
+    app.bg_color[COLOR_LEN - 1] = '\0';
+    app.fg_color[COLOR_LEN - 1] = '\0';
     
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--color") == 0) {
             app.use_color = 1;
-            if (++i >= argc) { print_usage(argv[0]); return 0; }
-            
-            while (i < argc) {
-                if (strncmp(argv[i], "--bg=", 5) == 0) {
-                    strncpy(app.bg_color, argv[i] + 5, COLOR_LEN - 1);
-                } else if (strncmp(argv[i], "--fg=", 5) == 0) {
-                    strncpy(app.fg_color, argv[i] + 5, COLOR_LEN - 1);
-                } else if (strncmp(argv[i], "--text=", 7) == 0) {
-                    strncpy(app.text_color, argv[i] + 7, COLOR_LEN - 1);
-                } else { i--; break; }
-                i++;
-            }
-            
-            // Validate colors
-            if ((strcmp(app.bg_color, "default") != 0 && !get_color_code(app.bg_color, 1)) ||
-                (strcmp(app.fg_color, "default") != 0 && !get_color_code(app.fg_color, 0)) ||
-                (strlen(app.text_color) > 0 && strcmp(app.text_color, "default") != 0 && !get_color_code(app.text_color, 0))) {
-                fprintf(stderr, "Error: Invalid color name provided\n");
+        } else if (strncmp(argv[i], "--bg=", 5) == 0) {
+            app.use_color = 1;
+            const char *color = argv[i] + 5;
+            if (!validate_color(color)) {
+                fprintf(stderr, "Error: Invalid background color '%s'\n", color);
                 return 0;
             }
+            strncpy(app.bg_color, color, COLOR_LEN - 1);
+            app.bg_color[COLOR_LEN - 1] = '\0';
+        } else if (strncmp(argv[i], "--fg=", 5) == 0) {
+            app.use_color = 1;
+            const char *color = argv[i] + 5;
+            if (!validate_color(color)) {
+                fprintf(stderr, "Error: Invalid foreground color '%s'\n", color);
+                return 0;
+            }
+            strncpy(app.fg_color, color, COLOR_LEN - 1);
+            app.fg_color[COLOR_LEN - 1] = '\0';
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
         } else {
             fprintf(stderr, "Error: Unknown option '%s'\n", argv[i]);
-            print_usage(argv[0]);
+            return 0;
         }
     }
     return 1;
 }
 
-// Main function - initialize X11 and start event monitoring
+// Main function - FIXED for clean exit
 int main(int argc, char *argv[]) {
-    // Setup signal handlers for clean exit
+    // Setup signal handlers
     signal(SIGINT, cleanup_and_exit);
     signal(SIGTERM, cleanup_and_exit);
     signal(SIGQUIT, cleanup_and_exit);
     signal(SIGHUP, cleanup_and_exit);
     
-    if (!parse_args(argc, argv)) return EXIT_FAILURE;
+    if (!parse_args(argc, argv)) {
+        return EXIT_FAILURE;
+    }
     
-    // Hide cursor and initialize X11
-    printf("\033[?25l");
+    app.running = 1;
+    
+    // Initialize terminal
+    printf("\033[?25l\033[2J\033[H");
     fflush(stdout);
     
+    // Initialize X11
     app.display = XOpenDisplay(NULL);
     app.record_display = XOpenDisplay(NULL);
     if (!app.display || !app.record_display) {
         fprintf(stderr, "Error: Cannot open X display\n");
-        printf("\033[?25h"); // Restore cursor
-        return EXIT_FAILURE;
-    }
-    
-    // Setup X11 event recording
-    XRecordRange *range = XRecordAllocRange();
-    if (!range) {
-        fprintf(stderr, "Error: Cannot allocate X record range\n");
-        XCloseDisplay(app.display);
-        XCloseDisplay(app.record_display);
         printf("\033[?25h");
         return EXIT_FAILURE;
     }
     
-    range->device_events.first = KeyPress;
-    range->device_events.last = ButtonRelease;
+    // Check XRecord extension
+    int major, minor;
+    if (!XRecordQueryVersion(app.record_display, &major, &minor)) {
+        fprintf(stderr, "Error: XRecord extension not available\n");
+        cleanup_resources();
+        printf("\033[?25h");
+        return EXIT_FAILURE;
+    }
+    
+    // Setup recording
+    app.range = XRecordAllocRange();
+    if (!app.range) {
+        fprintf(stderr, "Error: Cannot allocate X record range\n");
+        cleanup_resources();
+        printf("\033[?25h");
+        return EXIT_FAILURE;
+    }
+    
+    app.range->device_events.first = KeyPress;
+    app.range->device_events.last = ButtonRelease;
     XRecordClientSpec clients = XRecordAllClients;
     
-    XRecordContext context = XRecordCreateContext(app.record_display, 0, &clients, 1, &range, 1);
-    if (!context) {
+    app.context = XRecordCreateContext(app.record_display, 0, &clients, 1, &app.range, 1);
+    if (!app.context) {
         fprintf(stderr, "Error: Cannot create X record context\n");
-        XFree(range);
-        XCloseDisplay(app.display);
-        XCloseDisplay(app.record_display);
+        cleanup_resources();
         printf("\033[?25h");
         return EXIT_FAILURE;
     }
     
-    if (!XRecordEnableContextAsync(app.record_display, context, event_callback, NULL)) {
+    if (!XRecordEnableContextAsync(app.record_display, app.context, event_callback, NULL)) {
         fprintf(stderr, "Error: Cannot enable X record context\n");
-        XRecordFreeContext(app.record_display, context);
-        XFree(range);
-        XCloseDisplay(app.display);
-        XCloseDisplay(app.record_display);
+        cleanup_resources();
         printf("\033[?25h");
         return EXIT_FAILURE;
     }
     
     print_centered("Termkey - Professional Edition");
     
-    // Main event loop
-    while (1) {
+    // Main event loop - IMPROVED with proper exit handling
+    while (app.running && !exit_requested) {
         XRecordProcessReplies(app.record_display);
-        usleep(10000); // Prevent high CPU usage
+        usleep(10000);
     }
     
-    return 0; // Unreachable due to signal handlers
+    // Clean exit
+    printf("\033[?25h\033[0m\033[2J\033[H");
+    cleanup_resources();
+    return EXIT_SUCCESS;
 }
