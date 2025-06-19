@@ -39,33 +39,27 @@ This will create an executable file called `termkey`.
 Run the program from the terminal:
 
 ```bash
-./termkey -c bg_color fg_color text_color
+./termkey -c bg_color fg_color
 ```
 
 - `bg_color`: Background color
 - `fg_color`: Foreground color
-- `text_color`: Text color
 
 ### Example Commands:
 
 1. **Set Background to Red and Text to Blue**:
    ```bash
-   ./termkey -c --bg=red --text=blue
+   ./termkey -c --bg=red --fg=blue
    ```
 
 2. **Set Background to Red and Text to Default**:
    ```bash
-   ./termkey -c --bg=red --text=default
+   ./termkey -c --bg=red --fg=default
    ```
 
 3. **Set text color to green**:
    ```bash
-   ./termkey -c --text=green
-   ```
-   
-4. **Set Background to Black and Foreground to White**:
-   ```bash
-   ./termkey -c --bg=black --fg=white
+   ./termkey -c --fg=green
    ```
 
 ### Supported Colors
