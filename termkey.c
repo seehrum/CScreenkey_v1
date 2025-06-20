@@ -1,5 +1,5 @@
 // termkey.c - Professional keyboard and mouse event monitor
-// Fixed segmentation fault and improved stability
+// Enhanced with multi-button mouse support and simultaneous click detection
 // Author: Programming Expert | Optimized Professional Version
 
 #include <stdio.h>
@@ -20,20 +20,29 @@
 #define MAX_MSG_LEN 256
 #define COLOR_LEN 20
 #define REPEAT_THRESHOLD_MS 100
+#define MAX_MOUSE_BUTTONS 16
+#define MULTI_CLICK_TIMEOUT_MS 50
+#define COMBINED_MSG_LEN 768  // Increased buffer size for combined messages
 
 // Global state structure
 typedef struct {
     Display *display, *record_display;
-    int use_color, mouse_pressed, running;
+    int use_color, running;
     char bg_color[COLOR_LEN], fg_color[COLOR_LEN];
     struct { 
         int shift_l, shift_r, ctrl_l, ctrl_r, alt_l, alt_r, 
             meta_l, meta_r, altgr, super_l, super_r; 
     } mods;
+    struct {
+        int buttons[MAX_MOUSE_BUTTONS];
+        int active_count;
+        struct timeval last_press_time;
+        char combined_message[COMBINED_MSG_LEN];
+    } mouse_state;
     KeySym last_key;
     int key_count;
     struct timeval last_key_time;
-    char last_message[MAX_MSG_LEN * 2];
+    char last_message[COMBINED_MSG_LEN];
     XRecordContext context;
     XRecordRange *range;
 } AppState;
@@ -78,6 +87,10 @@ static const char* get_color_code(const char *name, int is_bg);
 static void get_terminal_size(int *rows, int *cols);
 static void print_centered(const char *msg);
 static const char* mouse_button_name(int btn);
+static void handle_mouse_button_press(int button);
+static void handle_mouse_button_release(int button);
+static void update_mouse_display(void);
+static int is_mouse_multi_click_timeout(void);
 static const char* keysym_to_name(KeySym sym);
 static void update_modifiers(KeySym sym, int pressed);
 static long get_time_diff_ms(struct timeval *start, struct timeval *end);
@@ -85,8 +98,9 @@ static void event_callback(XPointer priv, XRecordInterceptData *data);
 static void print_usage(const char *prog);
 static int parse_args(int argc, char *argv[]);
 static int validate_color(const char *color);
+static void safe_string_append(char *dest, size_t dest_size, const char *src);
 
-// Signal handler for clean exit - FIXED
+// Signal handler for clean exit
 static void cleanup_and_exit(int sig) {
     exit_requested = 1;
     app.running = 0;
@@ -95,11 +109,10 @@ static void cleanup_and_exit(int sig) {
     const char reset[] = "\033c\033[0m\033[?25h\033[2J\033[H";
     write(STDOUT_FILENO, reset, sizeof(reset) - 1);
     
-    // Don't call cleanup_resources here - do it in main
     _exit(0);
 }
 
-// Cleanup resources properly - IMPROVED
+// Cleanup resources properly
 static void cleanup_resources(void) {
     if (app.context && app.record_display) {
         XRecordDisableContext(app.record_display, app.context);
@@ -121,6 +134,19 @@ static void cleanup_resources(void) {
     if (app.display) {
         XCloseDisplay(app.display);
         app.display = NULL;
+    }
+}
+
+// Safe string append function to prevent buffer overflow
+static void safe_string_append(char *dest, size_t dest_size, const char *src) {
+    if (!dest || !src || dest_size <= 1) return;
+    
+    size_t dest_len = strnlen(dest, dest_size - 1);
+    size_t remaining = dest_size - dest_len - 1;
+    
+    if (remaining > 0) {
+        strncat(dest, src, remaining);
+        dest[dest_size - 1] = '\0';
     }
 }
 
@@ -193,16 +219,105 @@ static void print_centered(const char *msg) {
     fflush(stdout);
 }
 
-// Mouse button names
+// Enhanced mouse button names with support for 5+ button mice
 static const char* mouse_button_name(int btn) {
     switch (btn) {
-        case Button1: return "LEFT CLICK";
-        case Button2: return "MIDDLE CLICK";
-        case Button3: return "RIGHT CLICK";
+        case Button1: return "CLICK LEFT";
+        case Button2: return "CLICK MIDDLE";
+        case Button3: return "CLICK RIGHT";
         case Button4: return "WHEEL UP";
         case Button5: return "WHEEL DOWN";
-        default: return "UNKNOWN BUTTON";
+        case 6: return "CLICK BUTTON 6";
+        case 7: return "CLICK BUTTON 7";
+        case 8: return "CLICK BUTTON 8";
+        case 9: return "CLICK BUTTON 9";
+        case 10: return "CLICK BUTTON 10";
+        case 11: return "CLICK BUTTON 11";
+        case 12: return "CLICK BUTTON 12";
+        case 13: return "CLICK BUTTON 13";
+        case 14: return "CLICK BUTTON 14";
+        case 15: return "CLICK BUTTON 15";
+        default: return "CLICK UNKNOWN";
     }
+}
+
+// Check if we're still within multi-click timeout
+static int is_mouse_multi_click_timeout(void) {
+    struct timeval current_time;
+    gettimeofday(&current_time, NULL);
+    long time_diff = get_time_diff_ms(&app.mouse_state.last_press_time, &current_time);
+    return time_diff <= MULTI_CLICK_TIMEOUT_MS;
+}
+
+// Handle mouse button press with multi-button support
+static void handle_mouse_button_press(int button) {
+    if (button < 1 || button >= MAX_MOUSE_BUTTONS) return;
+    
+    struct timeval current_time;
+    gettimeofday(&current_time, NULL);
+    
+    // If this is a new button press outside timeout, reset state
+    if (!is_mouse_multi_click_timeout() && app.mouse_state.active_count == 0) {
+        memset(app.mouse_state.buttons, 0, sizeof(app.mouse_state.buttons));
+        app.mouse_state.active_count = 0;
+        app.mouse_state.combined_message[0] = '\0';
+    }
+    
+    // Mark button as pressed if not already
+    if (!app.mouse_state.buttons[button]) {
+        app.mouse_state.buttons[button] = 1;
+        app.mouse_state.active_count++;
+        app.mouse_state.last_press_time = current_time;
+    }
+    
+    update_mouse_display();
+}
+
+// Handle mouse button release
+static void handle_mouse_button_release(int button) {
+    if (button < 1 || button >= MAX_MOUSE_BUTTONS) return;
+    
+    if (app.mouse_state.buttons[button]) {
+        app.mouse_state.buttons[button] = 0;
+        app.mouse_state.active_count--;
+        
+        if (app.mouse_state.active_count <= 0) {
+            app.mouse_state.active_count = 0;
+            memset(app.mouse_state.buttons, 0, sizeof(app.mouse_state.buttons));
+        }
+    }
+}
+
+// Update mouse display with combined button presses
+static void update_mouse_display(void) {
+    if (app.mouse_state.active_count == 0) return;
+    
+    char message[COMBINED_MSG_LEN] = "";
+    int first = 1;
+    
+    // Build combined message for simultaneous button presses
+    for (int i = 1; i < MAX_MOUSE_BUTTONS; i++) {
+        if (app.mouse_state.buttons[i]) {
+            const char *btn_name = mouse_button_name(i);
+            
+            if (!first) {
+                safe_string_append(message, sizeof(message), " + ");
+            }
+            
+            safe_string_append(message, sizeof(message), btn_name);
+            first = 0;
+        }
+    }
+    
+    // Store and display the combined message
+    strncpy(app.mouse_state.combined_message, message, sizeof(app.mouse_state.combined_message) - 1);
+    app.mouse_state.combined_message[sizeof(app.mouse_state.combined_message) - 1] = '\0';
+    
+    print_centered(message);
+    
+    // Reset key state when mouse is active
+    app.last_key = 0;
+    app.key_count = 0;
 }
 
 // Convert KeySym to name
@@ -232,7 +347,7 @@ static void update_modifiers(KeySym sym, int pressed) {
     }
 }
 
-// X11 event callback - IMPROVED with better error handling
+// X11 event callback with enhanced mouse handling
 static void event_callback(XPointer priv, XRecordInterceptData *data) {
     if (!data || data->category != XRecordFromServer || !data->data || exit_requested) {
         if (data) XRecordFreeData(data);
@@ -241,15 +356,12 @@ static void event_callback(XPointer priv, XRecordInterceptData *data) {
     
     xEvent *event = (xEvent *)data->data;
     int event_type = event->u.u.type & 0x7F;
-    char message[MAX_MSG_LEN * 2] = "";
+    char message[COMBINED_MSG_LEN] = "";
     
     if (event_type == ButtonPress) {
-        app.mouse_pressed = event->u.u.detail;
-        print_centered(mouse_button_name(app.mouse_pressed));
-        app.last_key = 0;
-        app.key_count = 0;
+        handle_mouse_button_press(event->u.u.detail);
     } else if (event_type == ButtonRelease) {
-        app.mouse_pressed = 0;
+        handle_mouse_button_release(event->u.u.detail);
     } else if (event_type == KeyPress) {
         KeySym sym = XkbKeycodeToKeysym(app.display, event->u.u.detail, 0, 0);
         update_modifiers(sym, 1);
@@ -260,7 +372,7 @@ static void event_callback(XPointer priv, XRecordInterceptData *data) {
             return;
         }
         
-        char upper_key[MAX_MSG_LEN], mod_msg[MAX_MSG_LEN] = "";
+        char upper_key[MAX_MSG_LEN], mod_msg[COMBINED_MSG_LEN / 2] = "";
         strncpy(upper_key, key_name, sizeof(upper_key) - 1);
         upper_key[sizeof(upper_key) - 1] = '\0';
         
@@ -274,53 +386,62 @@ static void event_callback(XPointer priv, XRecordInterceptData *data) {
                           sym == XK_Meta_L || sym == XK_Meta_R || sym == XK_ISO_Level3_Shift ||
                           sym == XK_Super_L || sym == XK_Super_R);
         
-        // Build modifier string
-        size_t remaining = sizeof(mod_msg) - 1;
-        char *pos = mod_msg;
-        
-        if (app.mods.ctrl_l && sym != XK_Control_L && remaining > 12) {
-            strcpy(pos, "CONTROL_L + "); pos += 12; remaining -= 12;
+        // Build modifier string using safe append
+        if (app.mods.ctrl_l && sym != XK_Control_L) {
+            safe_string_append(mod_msg, sizeof(mod_msg), "CONTROL_L + ");
         }
-        if (app.mods.ctrl_r && sym != XK_Control_R && remaining > 12) {
-            strcpy(pos, "CONTROL_R + "); pos += 12; remaining -= 12;
+        if (app.mods.ctrl_r && sym != XK_Control_R) {
+            safe_string_append(mod_msg, sizeof(mod_msg), "CONTROL_R + ");
         }
-        if (app.mods.alt_l && sym != XK_Alt_L && remaining > 8) {
-            strcpy(pos, "ALT_L + "); pos += 8; remaining -= 8;
+        if (app.mods.alt_l && sym != XK_Alt_L) {
+            safe_string_append(mod_msg, sizeof(mod_msg), "ALT_L + ");
         }
-        if (app.mods.alt_r && sym != XK_Alt_R && remaining > 8) {
-            strcpy(pos, "ALT_R + "); pos += 8; remaining -= 8;
+        if (app.mods.alt_r && sym != XK_Alt_R) {
+            safe_string_append(mod_msg, sizeof(mod_msg), "ALT_R + ");
         }
-        if (app.mods.shift_l && sym != XK_Shift_L && remaining > 10) {
-            strcpy(pos, "SHIFT_L + "); pos += 10; remaining -= 10;
+        if (app.mods.shift_l && sym != XK_Shift_L) {
+            safe_string_append(mod_msg, sizeof(mod_msg), "SHIFT_L + ");
         }
-        if (app.mods.shift_r && sym != XK_Shift_R && remaining > 10) {
-            strcpy(pos, "SHIFT_R + "); pos += 10; remaining -= 10;
+        if (app.mods.shift_r && sym != XK_Shift_R) {
+            safe_string_append(mod_msg, sizeof(mod_msg), "SHIFT_R + ");
         }
-        if (app.mods.meta_l && sym != XK_Meta_L && remaining > 9) {
-            strcpy(pos, "META_L + "); pos += 9; remaining -= 9;
+        if (app.mods.meta_l && sym != XK_Meta_L) {
+            safe_string_append(mod_msg, sizeof(mod_msg), "META_L + ");
         }
-        if (app.mods.meta_r && sym != XK_Meta_R && remaining > 9) {
-            strcpy(pos, "META_R + "); pos += 9; remaining -= 9;
+        if (app.mods.meta_r && sym != XK_Meta_R) {
+            safe_string_append(mod_msg, sizeof(mod_msg), "META_R + ");
         }
-        if (app.mods.altgr && sym != XK_ISO_Level3_Shift && remaining > 8) {
-            strcpy(pos, "ALTGR + "); pos += 8; remaining -= 8;
+        if (app.mods.altgr && sym != XK_ISO_Level3_Shift) {
+            safe_string_append(mod_msg, sizeof(mod_msg), "ALTGR + ");
         }
-        if (app.mods.super_l && sym != XK_Super_L && remaining > 10) {
-            strcpy(pos, "SUPER_L + "); pos += 10; remaining -= 10;
+        if (app.mods.super_l && sym != XK_Super_L) {
+            safe_string_append(mod_msg, sizeof(mod_msg), "SUPER_L + ");
         }
-        if (app.mods.super_r && sym != XK_Super_R && remaining > 10) {
-            strcpy(pos, "SUPER_R + "); pos += 10; remaining -= 10;
+        if (app.mods.super_r && sym != XK_Super_R) {
+            safe_string_append(mod_msg, sizeof(mod_msg), "SUPER_R + ");
         }
         
         // Add main key
-        if (remaining > strlen(upper_key)) {
-            strcpy(pos, upper_key);
-        }
+        safe_string_append(mod_msg, sizeof(mod_msg), upper_key);
         
-        // Format final message
-        if (app.mouse_pressed) {
-            snprintf(message, sizeof(message), "%s + %s", 
-                    mouse_button_name(app.mouse_pressed), mod_msg);
+        // Format final message - enhanced with mouse combination support
+        if (app.mouse_state.active_count > 0) {
+            // Safely combine mouse and keyboard messages
+            size_t mouse_len = strlen(app.mouse_state.combined_message);
+            size_t mod_len = strlen(mod_msg);
+            
+            if (mouse_len > 0 && mod_len > 0 && 
+                mouse_len + mod_len + 4 < sizeof(message)) {
+                strcpy(message, app.mouse_state.combined_message);
+                safe_string_append(message, sizeof(message), " + ");
+                safe_string_append(message, sizeof(message), mod_msg);
+            } else if (mouse_len > 0) {
+                strncpy(message, app.mouse_state.combined_message, sizeof(message) - 1);
+                message[sizeof(message) - 1] = '\0';
+            } else {
+                strncpy(message, mod_msg, sizeof(message) - 1);
+                message[sizeof(message) - 1] = '\0';
+            }
         } else {
             strncpy(message, mod_msg, sizeof(message) - 1);
             message[sizeof(message) - 1] = '\0';
@@ -334,9 +455,16 @@ static void event_callback(XPointer priv, XRecordInterceptData *data) {
         if (sym == app.last_key && strcmp(message, app.last_message) == 0 && 
             !is_modifier && time_diff > REPEAT_THRESHOLD_MS) {
             app.key_count++;
-            char counted_msg[MAX_MSG_LEN * 2 + 32];
-            snprintf(counted_msg, sizeof(counted_msg), "%s [x%d]", message, app.key_count);
-            print_centered(counted_msg);
+            char counted_msg[COMBINED_MSG_LEN + 32];
+            size_t msg_len = strlen(message);
+            
+            // Safe formatting for repeat count
+            if (msg_len + 32 < sizeof(counted_msg)) {
+                snprintf(counted_msg, sizeof(counted_msg), "%s [x%d]", message, app.key_count);
+                print_centered(counted_msg);
+            } else {
+                print_centered(message);
+            }
             app.last_key_time = current_time;
         } else if (time_diff > REPEAT_THRESHOLD_MS || sym != app.last_key || 
                    strcmp(message, app.last_message) != 0) {
@@ -366,6 +494,11 @@ static void print_usage(const char *prog) {
     printf("      --fg=COLOR        Set foreground color\n");
     printf("  -h, --help            Show help\n\n");
     printf("Colors: black, red, green, yellow, blue, magenta, cyan, white, default\n\n");
+    printf("Features:\n");
+    printf("  - Simultaneous mouse button detection\n");
+    printf("  - Extended mouse support (up to 15 buttons)\n");
+    printf("  - Key combination and modifier display\n");
+    printf("  - Color customization\n\n");
     printf("Examples:\n");
     printf("  %s -c --fg=green\n", prog);
     printf("  %s -c --bg=black --fg=cyan\n", prog);
@@ -410,7 +543,7 @@ static int parse_args(int argc, char *argv[]) {
     return 1;
 }
 
-// Main function - FIXED for clean exit
+// Main function
 int main(int argc, char *argv[]) {
     // Setup signal handlers
     signal(SIGINT, cleanup_and_exit);
@@ -423,6 +556,9 @@ int main(int argc, char *argv[]) {
     }
     
     app.running = 1;
+    
+    // Initialize mouse state
+    memset(&app.mouse_state, 0, sizeof(app.mouse_state));
     
     // Initialize terminal
     printf("\033[?25l\033[2J\033[H");
@@ -474,9 +610,9 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
     
-    print_centered("Termkey - Professional Edition");
+    print_centered("Termkey - Professional Edition v2.0");
     
-    // Main event loop - IMPROVED with proper exit handling
+    // Main event loop
     while (app.running && !exit_requested) {
         XRecordProcessReplies(app.record_display);
         usleep(10000);
